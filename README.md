@@ -2,7 +2,7 @@
 
 [中文说明](README.zh.md)
 
-Turn an **unrooted** Android phone into a single-line **cellular ↔ SIP gateway**. The phone registers to your PBX
+Turn an **unrooted** Android 11+ phone into a single-line **cellular ↔ SIP gateway**. The phone registers to your PBX
 (Asterisk / FreePBX / IssabelPBX) as a SIP trunk:
 
 - **Cellular → SIP**: an incoming cellular call rings a DID on the PBX; the cellular call is answered only once
@@ -20,6 +20,9 @@ hidden platform APIs, which is also why the app is distributed through GitHub Re
 > drop or misroute calls, and is provided **as is, without warranty of any kind**. Read the
 > [Disclaimer](#disclaimer) before using it.
 
+> [!IMPORTANT]
+> **AI SLOP WARNING:** This app is almost fully LLM-generated. The repo owners do not claim to understand the code here.
+
 ## Status
 
 Tested on:
@@ -36,23 +39,11 @@ through a Flexisip proxy.
 Not yet verified: call waiting, DTMF and network-loss recovery with the pjsua2 stack, public calls over cellular
 data only.
 
-The default pjsua2 SIP stack prefers mono Opus (16 kHz PCM, 20 ms frames, 20 kbit/s target), with G.711
-(PCMU/PCMA) fallback. Android capture/injection and the bridge use 16 kHz mono PCM for pjsua2, and 8 kHz
-for the built-in Kotlin/G.711 stack. Each 20 ms socket packet is respectively 640 or 320 bytes. PJMEDIA
-resamples between the 16 kHz bridge and G.711. There is no automatic 16-to-8 kHz fallback: Android
-open/start/read/write failures are reported and terminate the tap. A 16 kHz stream can still contain
-upsampled narrowband audio, depending on the cellular call and device. Opus uses the standard
-`opus/48000/2` SDP mapping with `maxplaybackrate=16000` and `sprop-maxcapturerate=16000`. G.722 is disabled.
-Opus VAD/DTX is enabled by default to reduce cellular-to-SIP silence payload bandwidth; SDP advertises
-`usedtx=1` to request DTX from the SIP peer too. The peer's negotiated DTX preference is honored.
-PCMU/PCMA keep VAD disabled and transmit continuously. PCM capture and bridging continue every 20 ms.
-Quiet speech, call-progress tones, hold music and prolonged silence with PBX/NAT timeouts still need
-device testing. Acoustic echo cancellation belongs at the microphone endpoint.
-The 16 kHz tap and Opus calls have not yet been verified on a device.
+The default pjsua2 SIP stack supports Opus with G.711 fallback. See [audio formats and routing](TECHNICAL.md#audio-formats-and-routing)
+for codec settings and further validation gaps.
 
-Limitations: one call at a time. The APK packages arm64-v8a and x86_64 and targets Android 11+
-(minSdk 30). Android 11–13 compatibility and physical two-way cellular audio remain unverified;
-only the devices above have been tested. Hidden APIs and modem routing may differ across devices.
+Limitations: one call at a time. The APK packages arm64-v8a and targets Android 11+ (minSdk 30).
+Android 11 compatibility remain unverified. Hidden APIs and modem routing may differ across devices.
 Default-dialer mode provides gateway status and recovery, with a switch-dialer action for manual calling.
 Emergency numbers are always refused and are never dialed through the gateway.
 
@@ -69,41 +60,15 @@ Emergency numbers are always refused and are never dialed through the gateway.
 
    The SHA-256 digest of the release signing certificate is
    `b8fe38aa02f9657c6785fb6faeb20abb20deba410f9c643fcd93269b642850c4`.
-3. Open the app, tap **Grant Shizuku** and allow access. The app then runs its setup automatically (appops,
-   Telecom companion override where applicable, Doze allowlist, runtime permissions) and repeats it after upgrades.
-   A health check runs every 60 s and retries setup while idle if takeover is enabled and companion call access is unavailable.
-   On Android 11, turn **Take over calls** on (or tap **Enable takeover**) to grant default-dialer call access.
-   With Shizuku connected, this saves your previous dialer and changes the role directly, without the
-   system role dialog. Changes wait for current calls to end and can be cancelled while waiting.
-   Without Shizuku, the explicit switch-on action opens Android's role-selection dialog.
-   Startup, setup and health checks never acquire the role. On newer versions, Automatic call access keeps companion
-   integration unless the app already holds the dialer role; Advanced settings can select either mode explicitly.
+3. Open the app, tap **Grant Shizuku** and allow access. Setup runs automatically.
+   On Android 11, enabling **Take over calls** also makes this app the default dialer.
+   Newer versions normally work alongside your existing dialer as an InCallService companion app.
 4. Fill in **Settings** (PBX host/port, transport, SRTP, user, password, …) and tap **Save & apply**.
-5. **Take over calls** is the master switch. In default-dialer mode, switching it on also saves your previous
-   dialer and acquires the role. Switching off waits for current calls and bridge cleanup, then stops bridging
-   and companion integration and restores your previous dialer through Shizuku.
-   If that dialer is unavailable, the app attempts the system fallback. **Choose dialer in Settings**
-   remains available in Advanced settings and appears on restoration failure for manual recovery.
-   **Keep default-dialer role when gateway is off** in Advanced disables automatic restoration on the next
-   switch-off. Independent **Become default dialer** and **Restore previous dialer** actions are also in Advanced.
-   Role changes made in Settings leave takeover unchanged; a pending
-   request will not replace a different dialer selected while it was waiting. The saved return dialer
-   survives process restarts, but pending role changes are never replayed automatically after restart.
-   Toggling takeover again cancels the pending handoff; existing calls keep their bridge.
-   On Android 12+, Automatic returns to companion mode after restoration. Select **Default dialer** in Advanced
-   to acquire the role on each switch-on.
-   In companion mode, switching takeover off also stops the foreground service and removes its notification;
-   idle gateway standby keeps both running. In dialer mode, the service runs while this app is the default
-   dialer. Owned calls finish cleanup before the service stops.
+5. Enable **Take over calls** to bridge calls to the PBX. Switching off waits for current calls to end.
+   In default-dialer mode, Shizuku saves your previous dialer and restores it when takeover is switched off,
+   unless role retention is enabled in Advanced settings. If restoration fails, use **Choose dialer in Settings**.
 
-Advanced settings are collapsed by default. They contain call-access and cellular-audio choices, dialer-role
-controls and retention, automatic
-handset suppression when supported, loopback, debug logging, and diagnostics. The call log remains visible
-outside Advanced. Direct telephony audio skips the modern redirection helpers and uses voice-call stream mute for handset output,
-including on API 30–32; supported redirection taps retain mode-based suppression. The helper restores its
-changes when the tap closes and preserves an already-muted stream. Device policy/HAL support and both
-audio directions still need testing with suppression enabled. If the helper is forcibly killed, stream
-mute can remain active; raising the call volume can unmute it.
+See [Advanced settings](#advanced-settings) for call-access modes, audio choices, and dialer recovery.
 
 For local listening, turn **Mute local call output** off in **Advanced settings** before the call.
 Downlink output follows the phone's current call audio route (earpiece, speaker, or headset) and volume.
@@ -126,6 +91,28 @@ The handset microphone stays muted while bridging, so local listening does not e
 TLS validates the server certificate chain and host name against the Android system CA store (TLS 1.2/1.3 only)
 and accepts `*.` wildcard certificates in the left-most label (RFC 6125). There is no downgrade: if TLS fails,
 registration fails and is retried every 30 s.
+
+### Advanced settings
+
+Advanced settings are collapsed by default. **Call access** controls how the gateway receives and manages
+cellular calls:
+
+| Choice | Behavior |
+|---|---|
+| Automatic | Uses default-dialer mode on Android 11; on Android 12+, uses companion mode unless this app already holds the dialer role. |
+| Alongside dialer (companion) | Works alongside your usual phone app, which keeps its call UI and default-dialer role. Available on Android 12+. |
+| Default dialer | Makes the gateway the default phone app when takeover is enabled. Its UI provides gateway status and recovery; switch back to your usual dialer for manual calling. |
+
+Changing this choice alone does not change the default phone app. In default-dialer mode, switching takeover
+on acquires the role; switching off restores the previous dialer unless **Keep default-dialer role when gateway
+is off** is enabled. Advanced also provides **Become default dialer**, **Restore previous dialer**, and
+**Choose dialer in Settings**. Role changes wait for current calls to end. Both call-access modes still need
+Shizuku for call audio.
+
+**Cellular audio** offers Automatic, Direct telephony, and Call redirection; leave it on Automatic for normal
+use. Other options control local call output, loopback (answers and echoes incoming calls), debug logging,
+and diagnostics. See [call access and takeover](TECHNICAL.md#call-access-and-takeover) and
+[audio formats and routing](TECHNICAL.md#audio-formats-and-routing) for implementation details.
 
 ### adb control
 
@@ -240,45 +227,10 @@ ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.s
 ./gradlew :app:assembleDebug
 ```
 
-The native build script downloads pinned, SHA-256-verified upstream tarballs and applies the patches in
-`sip-pjsua2/native/`.
+The default native build targets arm64-v8a. Match native ABIs to the app's Gradle `abiFilters`.
 
-Tarballs and shared library source trees live directly under
-`sip-pjsua2/build/pjproject/` (override with `PJ_WORK`). Each ABI has `openssl-build/`, `opus-build/`,
-`prefix/{openssl,opus}/` and its own PJSIP source/build tree, since PJSIP generates target-specific
-configuration and headers inside its source tree. Set, for example,
-`ABIS="arm64-v8a x86_64"` to build multiple targets sequentially; APK packaging still follows Gradle's ABI filters.
-Build native libraries for each ABI selected by the app's Gradle filters.
-JVM modules target Java 17 bytecode using the JDK running Gradle; a separate JDK 17 toolchain is not required.
-Each requested ABI directory is recreated and rebuilt from scratch, including dependency installations,
-PJSIP patches and JNI output. Shared dependency sources and verified tarballs are retained; there are no
-build fingerprints or incremental object caches. SWIG generates the Java bindings and C++ wrapper once per
-invocation; the wrapper is compiled and linked separately for each ABI. New bindings are staged and published
-only after all requested ABIs succeed, preserving the previous output on a build failure. Do not run builds sharing the
-same work/output directories concurrently.
-
-Native C/C++ code uses ThinLTO, hidden visibility and section garbage collection. The final export map
-exposes only PJSUA2 JNI entry points; OpenSSL, Opus and PJSIP symbols are local. The build checks exports
-and writes `pjsua2.exports.txt` under the ABI work directory. Exported JNI wrappers and OpenSSL's internal
-algorithm registries still retain reachable code; Java shrinking alone does not remove native wrappers.
-
-`native/pjsua2-java-profile.i` trims the Java/JNI surface by feature group while keeping upstream
-`pjsua2.i`: video, buddies, file playback/recording, AI media ports, tone generators and JSON persistence
-are excluded. `Endpoint` uses its native default callbacks; `Account`, `Call`, `AudioMediaPort` and
-`LogWriter` retain Java directors, including their default callbacks. SIP/TLS/SRTP configuration, codec
-controls, `AudDevManager.setNullDev()` and bulk PCM copies remain available. Restore an excluded group
-in that file if needed, or the `Endpoint` director if subclassing it. On PJSIP upgrades, check the
-exclusions against upstream names, rebuild the bindings and app (including release), and verify SIP
-callbacks and audio on a device. This profile
-reduces JNI reachability; it does not remove all underlying native implementations.
-
-Release builds enable R8 with consumer rules preserving SWIG bindings/director callbacks and Shizuku's
-reflectively loaded service constructor. Other app and dependency code can be optimized. Validate a release
-APK's Shizuku startup, SIP callbacks and TLS/SRTP audio before relying on new shrinking rules.
-
-Release builds are signed only when `vsa.signing.storeFile`, `vsa.signing.storePassword`, `vsa.signing.keyAlias`
-and `vsa.signing.keyPassword` are set in `~/.gradle/gradle.properties`; otherwise `assembleRelease` produces an
-unsigned APK.
+The script builds OpenSSL, libopus, and PJSIP from pinned, SHA-256-verified sources.
+See [native dependencies](TECHNICAL.md#native-dependencies) for build layout and rebuild behavior.
 
 ## Architecture
 
