@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-把一台**未 root** 的 Android 手机变成单线 **蜂窝 ↔ SIP 网关**。手机以 SIP trunk 的方式注册到你的 PBX
+把一台**未 root** 的 Android 11+ 手机变成单线 **蜂窝 ↔ SIP 网关**。手机以 SIP trunk 的方式注册到你的 PBX
 （Asterisk / FreePBX / IssabelPBX）：
 
 - **蜂窝来电 → SIP**：蜂窝来电会呼叫 PBX 上的一个 DID；SIP 侧有人接听后才接听蜂窝来电，主叫号码通过
@@ -18,6 +18,9 @@
 > 这是一个基于未公开 Android 行为的个人项目，任何一次系统更新都可能让它失效，也可能掉话或把呼叫送错地方。
 > 本软件**按原样提供，不附带任何形式的担保**。使用前请阅读[免责声明](#免责声明)。
 
+> [!IMPORTANT]
+> **AI垃圾警告:** 该APP完全由LLM生成。仓库所有者其实不理解这些代码。
+
 ## 状态
 
 测试过的设备：
@@ -32,20 +35,11 @@
 
 尚未验证：通话等待、pjsua2 栈下的 DTMF 与断网恢复、仅用蜂窝数据的公网通话。
 
-默认 pjsua2 栈优先使用单声道 Opus（16 kHz PCM、20 ms 帧、目标码率 20 kbit/s），并保留 G.711
-（PCMU/PCMA）作为回退。pjsua2 的 Android 采集、注入和音频桥使用 16 kHz 单声道 PCM；内置 Kotlin/G.711
-栈使用 8 kHz。每个 20 ms socket 数据包分别为 640 或 320 字节。PJMEDIA 在 16 kHz 音频桥和 G.711 之间
-重采样。不自动从 16 kHz 回退到 8 kHz：Android 打开、启动、读写失败会报错并关闭音频通道。
-16 kHz 流仍可能是窄带音频的上采样，取决于蜂窝通话和设备。SDP 使用标准的 `opus/48000/2`，并声明 `maxplaybackrate=16000` 和
-`sprop-maxcapturerate=16000`。G.722 已禁用。Opus 默认启用 VAD/DTX，减少蜂窝到 SIP 方向静音时的
-音频载荷带宽；SDP 声明 `usedtx=1`，同时请求 SIP 对端使用 DTX，并遵循对端协商的 DTX 偏好。
-PCMU/PCMA 保持 VAD 关闭并连续发送。PCM 采集和音频桥仍每 20 ms 运行一次。
-轻声语音、呼叫提示音、等待音乐以及长时间静音时的 PBX/NAT 超时行为仍需在设备上验证。
-声学回声消除应由实际使用麦克风的客户端完成。
-16 kHz 音频通道和 Opus 通话尚未在设备上验证。
+默认 pjsua2 栈支持 Opus，并保留 G.711 作为回退。
+编解码设置和其他验证事项见英文[音频格式与路由说明](TECHNICAL.md#audio-formats-and-routing)。
 
-限制：同一时间只有一路通话；APK 包含 arm64-v8a 和 x86_64；最低为 Android 11（minSdk 30）。Android 11–13 的兼容性和双向蜂窝通话音频尚未经过真机验证，
-仅在上表设备上测试过，其他机型的隐藏 API 和调制解调器路由可能不同。
+限制：同一时间只有一路通话；APK 包含 arm64-v8a；最低为 Android 11（minSdk 30）。
+其他机型的隐藏 API 和音频路由可能不同。
 默认拨号器模式提供网关状态和恢复界面，可通过切换拨号器恢复手动通话。紧急号码一律拒绝，绝不会经网关拨出。
 
 ## 安装
@@ -58,37 +52,19 @@ PCMU/PCMA 保持 VAD 关闭并连续发送。PCM 采集和音频桥仍每 20 ms 
    ```
 
    正式版签名证书的 SHA-256 为 `b8fe38aa02f9657c6785fb6faeb20abb20deba410f9c643fcd93269b642850c4`。
-3. 打开 App，点 **Grant Shizuku** 并允许。App 会自动执行 setup（appops、适用时的 Telecom 伴侣覆盖、Doze 白名单、运行时权限），
-   升级后会重新执行。每 60 s 检查一次健康状态；开启接管且伴侣模式的通话访问不可用时，会在空闲期间重试 setup。
-   Android 11 需要开启 **Take over calls**（或点 **Enable takeover**），取得默认拨号器模式的通话访问权限。
-   Shizuku 已连接时，App 会先保存原来的拨号器，再直接切换角色，无需系统角色选择对话框。
-   角色切换会等待当前通话结束，等待期间可以取消。Shizuku 未连接时，手动开启接管会打开 Android 的角色选择对话框。
-   App 启动、setup 和健康检查都不会取得该角色。
-   较新版本的自动通话访问模式默认使用伴侣集成，已持有默认拨号器角色时使用拨号器集成；也可在高级设置中显式选择。
+3. 打开 App，点 **Grant Shizuku** 并允许，App 会自动完成 setup。
+   Android 11 上，开启 **Take over calls** 也会将本 App 设为默认拨号器。
+   较新版本通常以 InCallService 伴侣应用的身份与现有拨号器并行工作。
 4. 在 **Settings** 中填写 PBX 地址/端口、传输方式、SRTP、用户名、密码等，点 **Save & apply**。
-5. **Take over calls** 是总开关。在默认拨号器模式下，开启时也会保存原来的拨号器，并取得默认拨号器角色。
-   关闭时会等待当前通话结束、桥接清理完成，再停止桥接和伴侣集成，并通过 Shizuku 恢复原来的拨号器。
-   若原来的拨号器不可用，App 会尝试切回系统默认拨号器。高级设置中可通过 **Choose dialer in Settings**
-   打开系统设置，手动恢复；恢复失败时，主界面也会显示该操作。
-   高级设置中的 **Keep default-dialer role when gateway is off** 可让下次关闭接管时保留默认拨号器角色。
-   独立的 **Become default dialer** 和 **Restore previous dialer** 操作也放在高级设置中。
-   在系统设置中切换拨号器不会改变接管开关；等待中的角色切换请求也不会覆盖用户在等待期间选择的新拨号器。
-   保存的原拨号器信息会在进程重启后保留，但等待中的角色切换请求不会在重启后自动执行。
-   再次切换接管开关会取消等待中的角色切换，现有通话的桥接会继续保留。
-   Android 12 及以上版本中，自动模式会在恢复拨号器后回到伴侣模式；若希望每次开启接管都取得默认拨号器角色，
-   请在高级设置中选择 **Default dialer**。
-   在伴侣模式下，关闭接管也会停止前台服务并移除通知；开启接管时，即使没有正在进行的网关通话，待机期间仍保留服务和通知。
-   在拨号器模式下，仅当本 App 是默认拨号器时才保持前台服务运行；失去该角色后会停止服务并移除通知。
-   已接管的通话会先完成清理，再停止服务。重新开启接管或取得默认拨号器角色时，会重新启动服务。
+5. 开启 **Take over calls**，将呼叫桥接到 PBX；关闭时会等待当前通话结束。
+   默认拨号器模式下，Shizuku 会保存原来的拨号器，在关闭接管时恢复，除非在高级设置中选择保留角色。
+   恢复失败时，可使用 **Choose dialer in Settings** 手动切换。
 
-高级设置默认折叠，包含通话访问、蜂窝音频、拨号器角色切换与保留、本机输出静音、回声测试、调试日志和诊断选项；
-通话日志在高级设置外直接显示。
-直接电话音频模式会通过通话音频流静音来抑制本机输出，也适用于 API 30–32；支持重定向的
-音频通道仍使用音频模式切换。关闭音频通道时会恢复本应用的修改，原本已经静音的音频流会保持不变。
-开启后仍需在设备上验证本机静音和双向音频。若特权进程被强制终止，通话音频流可能保持静音；提高通话音量可解除。
+通话访问模式、音频选项和拨号器恢复见[高级设置](#高级设置)。
 
-若要在手机旁监听，在通话开始前到 **Advanced settings** 关闭 **Mute local call output**。
-下行音频按当前通话路由（听筒、扬声器或耳机）和音量播放。桥接期间本机麦克风仍保持静音，因此本地监听不会启用本机语音输入。
+若要在手机旁监听，在通话前到 **Advanced settings** 关闭 **Mute local call output**。
+下行音频按手机当前的通话路由（听筒、扬声器或耳机）和音量播放。
+桥接期间本机麦克风仍保持静音，因此本地监听不会启用本机语音输入。
 
 ## 配置
 
@@ -106,6 +82,26 @@ PCMU/PCMA 保持 VAD 关闭并连续发送。PCM 采集和音频桥仍每 20 ms 
 
 TLS 用 Android 系统 CA 库校验服务器证书链和主机名，仅支持 TLS 1.2/1.3，接受最左一级的 `*.` 通配证书（RFC 6125）。
 不做降级：TLS 失败就注册失败，每 30 s 重试。
+
+### 高级设置
+
+高级设置默认折叠。**Call access** 决定网关如何获取和控制蜂窝通话：
+
+| 选项 | 行为 |
+|---|---|
+| Automatic | Android 11 使用默认拨号器模式；Android 12 及以上默认使用伴侣模式，已持有拨号器角色时使用默认拨号器模式。 |
+| Alongside dialer（伴侣模式） | 与平常使用的电话 App 并行工作，保留其通话界面和默认拨号器角色。适用于 Android 12 及以上。 |
+| Default dialer（默认拨号器模式） | 开启接管时将网关设为默认电话 App。界面提供网关状态和恢复操作；需要手动通话时，应切回平常使用的拨号器。 |
+
+仅修改此选项不会切换默认电话 App。默认拨号器模式下，开启接管会取得角色；关闭时恢复原来的拨号器，
+除非开启 **Keep default-dialer role when gateway is off**。高级设置也提供 **Become default dialer**、
+**Restore previous dialer** 和 **Choose dialer in Settings**。角色切换会等待当前通话结束。
+两种通话访问模式都仍需 Shizuku 提供通话音频。
+
+**Cellular audio** 可选 Automatic、Direct telephony 和 Call redirection，通常保留 Automatic 即可。
+其他选项包括本机通话输出、回声测试（接听并回放蜂窝来电的声音）、调试日志和诊断。
+实现细节见英文[通话访问与接管说明](TECHNICAL.md#call-access-and-takeover)和
+[音频格式与路由说明](TECHNICAL.md#audio-formats-and-routing)。
 
 ### adb 控制
 
@@ -205,7 +201,7 @@ Flexisip 不需要为网关做任何专门配置：
 
 ## 从源码构建
 
-需要：JDK 17+，带 NDK 的 Android SDK，`swig`（如 `brew install swig`）。
+需要 JDK 17+、带 NDK 的 Android SDK，以及 `swig`（例如 `brew install swig`）。
 
 ```bash
 ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.sh   # 只需一次；产物在 git 忽略的 src/generated/
@@ -213,26 +209,10 @@ ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.s
 ./gradlew :app:assembleDebug
 ```
 
-原生构建脚本会下载版本固定、经 SHA-256 校验的上游源码包，并应用 `sip-pjsua2/native/` 中的补丁。
+原生构建默认面向 arm64-v8a，需与 App 的 Gradle `abiFilters` 一致。
 
-源码包和共享依赖库的源码树直接放在 `sip-pjsua2/build/pjproject/`
-顶层（可用 `PJ_WORK` 指定其他目录）。每个 ABI 下保留 `openssl-build/`、`opus-build/`、
-`prefix/{openssl,opus}/` 和独立的 PJSIP 源码/构建目录，因为 PJSIP 的构建系统会在源码树内生成目标相关的配置和头文件。
-例如，设置 `ABIS="arm64-v8a x86_64"` 可依次构建多个目标；APK 实际包含的 ABI 仍由 Gradle 的 ABI filters 决定。
-每次都会重新创建指定的 ABI 目录并完整构建，包括依赖安装目录、PJSIP 补丁和 JNI 产物。
-共享依赖源码和经校验的源码包会保留；不使用构建指纹或增量目标文件缓存。
-每次调用只运行一次 SWIG，生成 Java 绑定和 C++ 包装代码；包装代码仍为每个 ABI 单独编译和链接。
-所有 ABI 成功后才发布暂存的绑定，构建失败会保留原有产物。
-不要同时运行共用工作目录或输出目录的构建。
-
-原生 C/C++ 使用 ThinLTO、隐藏符号可见性和 section 垃圾回收。最终导出表仅保留 PJSUA2 JNI 入口，
-OpenSSL、Opus 和 PJSIP 符号均为本地符号。构建会检查导出表，并在 ABI 工作目录生成 `pjsua2.exports.txt`。
-JNI 包装入口和 OpenSSL 内部算法注册表仍会保留可达代码；仅缩减 Java 不会删除原生包装入口。
-Release 构建启用 R8，通过 consumer rules 保留 SWIG 绑定、director 回调及 Shizuku 反射加载的服务构造函数，
-其余应用和依赖代码可以优化。修改缩减规则后，应验证 release APK 的 Shizuku 启动、SIP 回调和 TLS/SRTP 音频。
-
-只有在 `~/.gradle/gradle.properties` 中设置了 `vsa.signing.storeFile`、`vsa.signing.storePassword`、
-`vsa.signing.keyAlias`、`vsa.signing.keyPassword` 时，release 构建才会签名；否则 `assembleRelease` 产出未签名的 APK。
+脚本使用版本固定、经 SHA-256 校验的源码构建 OpenSSL、libopus 和 PJSIP。
+构建目录布局和重新构建行为见英文[原生依赖说明](TECHNICAL.md#native-dependencies)。
 
 ## 架构
 
