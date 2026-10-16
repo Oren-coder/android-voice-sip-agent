@@ -100,7 +100,7 @@ internal object PjsuaLib {
         }
     }
 
-    /** The Android system trust store as one PEM bundle for OpenSSL. */
+    /** The Android system trust store as one PEM bundle for the native TLS backend. */
     private fun systemCaPem(): String {
         val ks = KeyStore.getInstance("AndroidCAStore").apply { load(null) }
         val enc = Base64.getMimeEncoder(64, "\n".toByteArray())

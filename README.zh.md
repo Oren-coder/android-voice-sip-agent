@@ -201,7 +201,8 @@ Flexisip 不需要为网关做任何专门配置：
 
 ## 从源码构建
 
-需要 JDK 17+、带 NDK 的 Android SDK，以及 `swig`（例如 `brew install swig`）。
+需要 JDK 17+、带 NDK 的 Android SDK、CMake、Python 3、SWIG（例如 `brew install cmake swig`），
+以及常用的 configure/make 工具。
 
 ```bash
 ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.sh   # 只需一次；产物在 git 忽略的 src/generated/
@@ -213,12 +214,20 @@ ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.s
 
 ### 原生依赖
 
-原生构建脚本会下载版本固定、经 SHA-256 校验的上游源码包，构建 OpenSSL、libopus 和 PJSIP 的 Java/JNI 绑定，
+原生构建脚本会下载版本固定、经 SHA-256 校验的上游源码包，构建 Mbed TLS 3.6.7、libopus 和 PJSIP 的 Java/JNI 绑定，
 并应用 `sip-pjsua2/native/` 中的补丁。
+PJSIP 固定在上游开发提交
+[`15e9be5494d72811690eaba75a8cb6b79678cbfc`](https://github.com/pjsip/pjproject/commit/15e9be5494d72811690eaba75a8cb6b79678cbfc)
+（2.17-dev），其中包含 Mbed TLS 生命周期、TLS 1.3 和 SRTP 安全随机数生成的修复。
+不应用本地 Mbed TLS 后端补丁；保留现有的通配符证书补丁，空闲声卡自动关闭的修复已由上游提供。
+Mbed TLS 使用 CMake 和 NDK 工具链构建，PJSIP 和 Opus 仍使用 configure/make。
+构建前需安装 CMake、Python 3、SWIG 以及常用的 configure/make 工具。
+可设置 `MBEDTLS_TARBALL=/path/to/mbedtls-3.6.7.tar.bz2` 使用已下载的发布包，否则脚本会自动下载。
+需使用包含 framework 子模块的完整发布包。
 
 源码包和共享依赖库的源码树直接放在 `sip-pjsua2/build/pjproject/`
-顶层（可用 `PJ_WORK` 指定其他目录）。每个 ABI 下保留 `openssl-build/`、`opus-build/`、
-`prefix/{openssl,opus}/` 和独立的 PJSIP 源码/构建目录，因为 PJSIP 的构建系统会在源码树内生成目标相关的配置和头文件。
+顶层（可用 `PJ_WORK` 指定其他目录）。每个 ABI 下保留 `mbedtls-build/`、`opus-build/`、
+`prefix/{mbedtls,opus}/` 和独立的 PJSIP 源码/构建目录，因为 PJSIP 的构建系统会在源码树内生成目标相关的配置和头文件。
 例如，设置 `ABIS="arm64-v8a x86_64"` 可依次构建多个目标；APK 实际包含的 ABI 仍由 Gradle 的 ABI filters 决定。
 需要为 App 的 Gradle filters 中指定的每个 ABI 构建原生库。
 JVM 模块使用运行 Gradle 的 JDK 生成 Java 17 字节码，不需要单独的 JDK 17 工具链。
@@ -227,6 +236,12 @@ JVM 模块使用运行 Gradle 的 JDK 生成 Java 17 字节码，不需要单独
 每次调用只运行一次 SWIG，生成 Java 绑定和 C++ 包装代码；包装代码仍为每个 ABI 单独编译和链接。
 所有 ABI 成功后才发布暂存的绑定，构建失败会保留原有产物。
 不要同时运行共用工作目录或输出目录的构建。
+
+Mbed TLS 构建为支持 pthread 和 TLS 1.2/1.3 的静态 PIC 库。上游后端为 SDES-SRTP 主密钥提供安全随机数，
+随机数生成失败时通话建立失败。随附的 libsrtp 使用内部密码算法，不链接 OpenSSL。
+此构建支持 SDES-SRTP，不提供 DTLS-SRTP、依赖 OpenSSL 的 SRTP 套件（AEAD-GCM、AES-CM-192）
+以及 PJSIP SHA-256/SHA-512-256 Digest 认证；SIP Digest 认证使用 MD5。
+证书链和主机名校验继续使用 App 提供的 Android 系统 CA 证书包。
 
 ## 架构
 
@@ -257,7 +272,7 @@ Copyright (C) 2026 sparkcyf
 
 本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证第 2 版或（由你选择）任何更新的版本，再分发和/或修改它。详见 [LICENSE](LICENSE)（以英文原文为准）。例外：允许将本程序与任何依据 Apache License 2.0 许可的库链接，前提是其余所有代码均遵守 GPL。
 
-Release APK 静态链接了 pjsip（GPL-2.0-or-later）、OpenSSL（Apache-2.0）和 libopus（BSD-3-Clause），见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+Release APK 静态链接了 pjsip（GPL-2.0-or-later）、Mbed TLS（Apache-2.0）和 libopus（BSD-3-Clause），见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 每个 release 对应的源码是本仓库对应 tag 的提交，加上 `sip-pjsua2/native/build-pjsua2.sh` 下载的版本固定的上游源码包。
 
 ## 免责声明

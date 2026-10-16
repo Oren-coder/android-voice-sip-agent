@@ -367,7 +367,7 @@ Audit the selected AndroidX AAR manifests and Java library API calls. Pin compat
 
 After the audio feasibility decision, set the chosen minimum consistently in `:app`, `:telephony`, `:privileged`, and `:sip-pjsua2`.
 
-Rebuild PJSIP, OpenSSL, Opus, and the SWIG/JNI wrapper for that minimum; the native build now defaults to API 30. Check native imports and loading on the oldest supported release. Preserve the current null sound device, format agreement, codec setup, release shrinking rules, and JNI/reflection entry points.
+Rebuild PJSIP, Mbed TLS, Opus, and the SWIG/JNI wrapper for that minimum; the native build now defaults to API 30. Check native imports and loading on the oldest supported release. Preserve the current null sound device, format agreement, codec setup, release shrinking rules, and JNI/reflection entry points.
 
 Retain arm64-only packaging initially if the test phone supports it. Add an armeabi-v7a build only if intended older devices require 32-bit support; keep ABI scope explicit.
 

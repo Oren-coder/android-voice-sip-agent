@@ -84,9 +84,9 @@ See [building from source](README.md#building-from-source) and [native dependenc
 for build commands, ABI selection, and dependency rebuild behavior.
 
 Native C/C++ code uses ThinLTO, hidden visibility and section garbage collection. The final export map
-exposes only PJSUA2 JNI entry points; OpenSSL, Opus and PJSIP symbols are local. The build checks exports
-and writes `pjsua2.exports.txt` under the ABI work directory. Exported JNI wrappers and OpenSSL's internal
-algorithm registries still retain reachable code; Java shrinking alone does not remove native wrappers.
+exposes only PJSUA2 JNI entry points; Mbed TLS, Opus and PJSIP symbols are local. The build checks exports
+and writes `pjsua2.exports.txt` under the ABI work directory. Exported JNI wrappers and the TLS backend's
+cipher tables still retain reachable code; Java shrinking alone does not remove native wrappers.
 
 `native/pjsua2-java-profile.i` trims the Java/JNI surface by feature group while keeping upstream
 `pjsua2.i`: video, buddies, file playback/recording, AI media ports, tone generators and JSON persistence

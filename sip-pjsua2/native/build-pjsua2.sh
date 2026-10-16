@@ -3,19 +3,21 @@
 #   src/generated/java      org.pjsip.pjsua2.* (SWIG output)
 #   src/generated/jniLibs   libpjsua2.so + libc++_shared.so per ABI
 # Both are git-ignored; rerun after a clean checkout or a native configuration change.
-# Tarballs and shared OpenSSL/Opus sources live at the work directory's top level.
+# Tarballs and shared Mbed TLS/Opus sources live at the work directory's top level.
 # Dependencies build out of tree; PJSIP keeps an isolated source/build tree per ABI.
 # Each ABI is rebuilt from scratch; shared source trees are retained.
 # Java/JNI wrapper generation runs once per invocation using the common Android binding profile;
 # the generated C++ wrapper is still compiled and linked separately for every ABI.
 # Media: null sound device only (no Android audio backend, so pjsua never touches
-# AudioManager), G.711 + mono Opus (up to 16 kHz), bundled libsrtp and OpenSSL TLS.
+# AudioManager), G.711 + mono Opus (up to 16 kHz), bundled libsrtp and Mbed TLS.
 set -euo pipefail
 
-PJ_VERSION=2.17
-PJ_SHA256=065fe06c06788d97c35f563796d59f00ce52fe9558a52d7b490a042a966facce
-OSSL_VERSION=3.5.9
-OSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
+PJ_VERSION=2.17-dev
+# Official upstream revision with Mbed TLS PSA/TLS 1.3 fixes and secure SDES RNG.
+PJ_REVISION=15e9be5494d72811690eaba75a8cb6b79678cbfc
+PJ_SHA256=a8b9291862fdd750c52e27c419c643a5ed84ee0813086ca6ba8f84feda4f11c0
+MBEDTLS_VERSION=3.6.7
+MBEDTLS_SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
 OPUS_VERSION=1.6.1
 OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
 ABIS=${ABIS:-arm64-v8a}
@@ -45,23 +47,27 @@ SDK=${ANDROID_HOME:-$(sed -n 's/^sdk.dir=//p' "$MODULE/../local.properties" 2>/d
 export ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT:-$SDK/ndk/28.2.13676358}
 [ -d "$ANDROID_NDK_ROOT" ] || { echo "NDK not found: $ANDROID_NDK_ROOT" >&2; exit 1; }
 command -v swig >/dev/null || { echo "swig not found (brew install swig)" >&2; exit 1; }
+command -v cmake >/dev/null || { echo "cmake not found" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 not found" >&2; exit 1; }
 
 mkdir -p "$WORK"
-# Download and verify the three upstream release tarballs.
-TARBALL="$WORK/pjproject-$PJ_VERSION.tar.gz"
+# Download and verify the three pinned upstream source archives.
+TARBALL="$WORK/pjproject-$PJ_REVISION.tar.gz"
 if [ ! -f "$TARBALL" ]; then
-  curl -fsSL -o "$TARBALL.part" "https://github.com/pjsip/pjproject/archive/refs/tags/$PJ_VERSION.tar.gz"
+  curl -fsSL -o "$TARBALL.part" "https://github.com/pjsip/pjproject/archive/$PJ_REVISION.tar.gz"
   mv "$TARBALL.part" "$TARBALL"
 fi
 echo "$PJ_SHA256  $TARBALL" | shasum -a 256 -c -
 
-OSSL_TARBALL="$WORK/openssl-$OSSL_VERSION.tar.gz"
-if [ ! -f "$OSSL_TARBALL" ]; then
-  curl -fsSL -o "$OSSL_TARBALL.part" \
-    "https://github.com/openssl/openssl/releases/download/openssl-$OSSL_VERSION/openssl-$OSSL_VERSION.tar.gz"
-  mv "$OSSL_TARBALL.part" "$OSSL_TARBALL"
+# Use the full release archive, which includes the framework submodule.
+# MBEDTLS_TARBALL can point at a previously downloaded release archive.
+MBEDTLS_TARBALL=${MBEDTLS_TARBALL:-$WORK/mbedtls-$MBEDTLS_VERSION.tar.bz2}
+if [ ! -f "$MBEDTLS_TARBALL" ]; then
+  curl -fsSL -o "$MBEDTLS_TARBALL.part" \
+    "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS_VERSION/mbedtls-$MBEDTLS_VERSION.tar.bz2"
+  mv "$MBEDTLS_TARBALL.part" "$MBEDTLS_TARBALL"
 fi
-echo "$OSSL_SHA256  $OSSL_TARBALL" | shasum -a 256 -c -
+echo "$MBEDTLS_SHA256  $MBEDTLS_TARBALL" | shasum -a 256 -c -
 
 OPUS_TARBALL="$WORK/opus-$OPUS_VERSION.tar.gz"
 if [ ! -f "$OPUS_TARBALL" ]; then
@@ -76,12 +82,18 @@ API=${APP_PLATFORM#android-}
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
 # Extract shared sources once. A marker is written only after extraction succeeds.
-# Configure runs in ABI build directories, leaving these source trees pristine.
-if [ ! -f "$WORK/openssl-$OSSL_VERSION/.extracted" ]; then
-  rm -rf "$WORK/openssl-$OSSL_VERSION"
-  tar xzf "$OSSL_TARBALL" -C "$WORK"
-  touch "$WORK/openssl-$OSSL_VERSION/.extracted"
+# Dependency builds run in ABI directories; Mbed TLS configuration is shared below.
+if [ ! -f "$WORK/mbedtls-$MBEDTLS_VERSION/.extracted" ]; then
+  rm -rf "$WORK/mbedtls-$MBEDTLS_VERSION"
+  tar xjf "$MBEDTLS_TARBALL" -C "$WORK"
+  touch "$WORK/mbedtls-$MBEDTLS_VERSION/.extracted"
 fi
+# The installed headers must match the library configuration. Configure the shared
+# source header so CMake installs the same settings used for every ABI's build.
+python3 "$WORK/mbedtls-$MBEDTLS_VERSION/scripts/config.py" \
+  -f "$WORK/mbedtls-$MBEDTLS_VERSION/include/mbedtls/mbedtls_config.h" set MBEDTLS_THREADING_C
+python3 "$WORK/mbedtls-$MBEDTLS_VERSION/scripts/config.py" \
+  -f "$WORK/mbedtls-$MBEDTLS_VERSION/include/mbedtls/mbedtls_config.h" set MBEDTLS_THREADING_PTHREAD
 if [ ! -f "$WORK/opus-$OPUS_VERSION/.extracted" ]; then
   rm -rf "$WORK/opus-$OPUS_VERSION"
   tar xzf "$OPUS_TARBALL" -C "$WORK"
@@ -104,36 +116,32 @@ mkdir -p "$SWIG_STAGE"
 
 for ABI in "${ABI_LIST[@]}"; do
   case $ABI in
-    arm64-v8a) OSSL_TARGET=android-arm64; OPUS_HOST=aarch64-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
-    armeabi-v7a) OSSL_TARGET=android-arm; OPUS_HOST=arm-linux-androideabi; OPUS_CC_TARGET=armv7a-linux-androideabi ;;
-    x86_64) OSSL_TARGET=android-x86_64; OPUS_HOST=x86_64-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
-    x86) OSSL_TARGET=android-x86; OPUS_HOST=i686-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
+    arm64-v8a) OPUS_HOST=aarch64-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
+    armeabi-v7a) OPUS_HOST=arm-linux-androideabi; OPUS_CC_TARGET=armv7a-linux-androideabi ;;
+    x86_64) OPUS_HOST=x86_64-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
+    x86) OPUS_HOST=i686-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
   esac
   ABI_WORK="$WORK/$ABI"
-  SSL_BUILD="$ABI_WORK/openssl-build"
+  SSL_BUILD="$ABI_WORK/mbedtls-build"
   OPUS_BUILD="$ABI_WORK/opus-build"
-  SSL_PREFIX="$ABI_WORK/prefix/openssl"
+  SSL_PREFIX="$ABI_WORK/prefix/mbedtls"
   OPUS_PREFIX="$ABI_WORK/prefix/opus"
-  SRC="$ABI_WORK/pjproject-$PJ_VERSION"
+  SRC="$ABI_WORK/pjproject-$PJ_REVISION"
   # Fresh objects, installed archives and JNI output avoid stale configuration,
   # patches or linking against an earlier dependency build.
   rm -rf "$ABI_WORK"
   mkdir -p "$ABI_WORK"
 
-  # Static OpenSSL for SIP TLS/SRTP.
-  mkdir -p "$SSL_BUILD"
-  (
-    cd "$SSL_BUILD"
-    export PATH="$LLVM_BIN:$PATH"
-    export AR="$LLVM_BIN/llvm-ar" RANLIB="$LLVM_BIN/llvm-ranlib"
-    perl "$WORK/openssl-$OSSL_VERSION/Configure" "$OSSL_TARGET" \
-      no-shared no-tests no-apps no-docs no-engine no-comp no-weak-ssl-ciphers no-legacy\
-      no-quic no-srp no-filenames no-autoload-config\
-      no-sm2 no-sm3 no-sm4 no-aria no-camellia no-ml-dsa no-slh-dsa no-ml-kem no-ec2m no-dsa\
-      --prefix="$SSL_PREFIX" --openssldir=/nonexistent --libdir=lib $NATIVE_CFLAGS
-    make -j"$JOBS" build_libs
-    make install_dev
-  )
+  # Static, thread-safe Mbed TLS for SIP TLS and secure SDES-SRTP key generation.
+  cmake -S "$WORK/mbedtls-$MBEDTLS_VERSION" -B "$SSL_BUILD" -G "Unix Makefiles" \
+    -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+    -DANDROID_ABI="$ABI" -DANDROID_PLATFORM="$APP_PLATFORM" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    -DCMAKE_C_FLAGS="$NATIVE_CFLAGS" -DCMAKE_INSTALL_PREFIX="$SSL_PREFIX" \
+    -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+    -DUSE_STATIC_MBEDTLS_LIBRARY=ON -DUSE_SHARED_MBEDTLS_LIBRARY=OFF
+  cmake --build "$SSL_BUILD" --parallel "$JOBS"
+  cmake --install "$SSL_BUILD"
 
   # Static libopus.
   mkdir -p "$OPUS_BUILD"
@@ -155,8 +163,7 @@ for ABI in "${ABI_LIST[@]}"; do
   cp "$HERE/config_site.h" "$SRC/pjlib/include/pj/config_site.h"
   # Accept "*." wildcard server certificates (RFC 6125); stock pjsip rejects them per RFC 5922.
   patch -p1 -d "$SRC" < "$HERE/pjsip-tls-wildcard.patch"
-  # Remove for 2.18 or later if https://github.com/pjsip/pjproject/pull/5336 lands.
-  patch -p1 -d "$SRC" < "$HERE/pjsip-close-idle-device.patch"
+  # Sound-device idle auto-close and Mbed TLS/SRTP fixes are included upstream.
   # Bulk byte[] <-> ByteVector copies; the stock binding is a List<Short> with one JNI call per byte.
   # Must precede %template(ByteVector), so it goes right after the and_string.i include.
   I="$SRC/pjsip-apps/src/swig/pjsua2.i"
@@ -177,7 +184,7 @@ for ABI in "${ABI_LIST[@]}"; do
     export LDFLAGS="${LDFLAGS:-} $NATIVE_LDFLAGS"
     # Null audio device, G.711/Opus, TLS and SRTP; omit unused codecs/video.
     TARGET_ABI=$ABI APP_PLATFORM=$APP_PLATFORM ./configure-android --use-ndk-cflags \
-      --with-ssl="$SSL_PREFIX" --with-opus="$OPUS_PREFIX" \
+      --with-mbedtls="$SSL_PREFIX" --with-opus="$OPUS_PREFIX" \
       --disable-sound --disable-video --disable-upnp \
       --disable-silk --disable-bcg729 --disable-lyra --disable-opencore-amr \
       --disable-openh264 --disable-vpx --disable-ffmpeg --disable-v4l2 --disable-sdl \
@@ -185,6 +192,7 @@ for ABI in "${ABI_LIST[@]}"; do
       --disable-gsm-codec --disable-ilbc-codec --disable-speex-codec --disable-g722-codec \
       --disable-g7221-codec --disable-l16-codec --disable-speex-aec
     grep -q "PJ_HAS_SSL_SOCK 1" pjlib/include/pj/compat/os_auto.h || { echo "SSL not enabled" >&2; exit 1; }
+    grep -q "PJ_SSL_SOCK_IMP PJ_SSL_SOCK_IMP_MBEDTLS" pjlib/include/pj/compat/os_auto.h || { echo "Mbed TLS not selected" >&2; exit 1; }
     grep -q "PJMEDIA_HAS_OPUS_CODEC 1" pjmedia/include/pjmedia-codec/config_auto.h || { echo "Opus not enabled" >&2; exit 1; }
     grep -q "PJMEDIA_HAS_G722_CODEC 0" pjmedia/include/pjmedia-codec/config_auto.h || { echo "G.722 not disabled" >&2; exit 1; }
     make -j"$JOBS"
@@ -236,4 +244,4 @@ rm -rf "$GENERATED"
 mv "$STAGE" "$GENERATED"
 STAGE=""
 ls -l "$GENERATED/jniLibs"/*/
-echo "pjsua2 $PJ_VERSION built for: ${ABI_LIST[*]}"
+echo "pjsua2 $PJ_VERSION ($PJ_REVISION) built for: ${ABI_LIST[*]}"

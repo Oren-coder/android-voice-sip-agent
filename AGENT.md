@@ -10,7 +10,7 @@ Code, comments and commit messages are in English.
 Turns an **unrooted** Android phone into a single-line **cellular ↔ SIP gateway** that registers to a PBX
 (Asterisk / FreePBX / IssabelPBX) as a trunk. Privileged operations run through **Shizuku (shell uid 2000)**.
 The SIP side has two interchangeable implementations: a hand-written pure-Kotlin stack (`:sip`, UDP only) and
-pjsip 2.17's pjsua2 (`:sip-pjsua2`, UDP/TCP/TLS + SDES-SRTP, the default).
+pjsip 2.17-dev's pjsua2 (`:sip-pjsua2`, UDP/TCP/TLS + SDES-SRTP, the default).
 
 Verified on a Pixel 11 Pro (Android 17) and a Motorola phone (Android 16): cellular inbound → PBX, PBX outbound
 via the phone, two-way audio, DTMF, Wi-Fi reconnect (also mid-call), handset muting while bridged, the takeover
@@ -21,7 +21,7 @@ pjsua2, public calls over cellular data only (Wi-Fi off).
 ## Common commands
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh                # once / on upgrade: builds OpenSSL 3.5.9 + libopus 1.6.1 + pjproject 2.17 (arm64) into git-ignored src/generated/
+sip-pjsua2/native/build-pjsua2.sh                # once / on upgrade: builds Mbed TLS 3.6.7 (CMake) + libopus 1.6.1 + pinned pjproject 2.17-dev (arm64) into git-ignored src/generated/
 ./gradlew :sip:test :gateway:test                # JVM unit tests (no native build needed)
 ./gradlew :sip-pjsua2:testDebugUnitTest          # INVITE parsing etc.
 ./gradlew :sip:test --tests 'io.github.sparkcyf.voicesipagent.sip.SipMessageTest'          # single test class
@@ -142,8 +142,14 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   - Native dependencies and the wrapper use NDK ThinLTO and section GC. `pjsua2.exports.map` localizes
     everything except JNI entry points; `build-pjsua2.sh` checks the final dynamic export table.
     Exported SWIG wrappers remain native reachability roots; R8 does not prune them.
-    Tarballs and shared OpenSSL/Opus sources live at the work directory's top level; ABI directories
-    hold out-of-tree dependency builds, `prefix/{openssl,opus}` and isolated PJSIP source/build trees.
+    Tarballs and shared Mbed TLS/Opus sources live at the work directory's top level; ABI directories
+    hold out-of-tree dependency builds, `prefix/{mbedtls,opus}` and isolated PJSIP source/build trees.
+    Mbed TLS uses CMake, static PIC libraries, pthread support and TLS 1.2/1.3. PJSIP/Opus retain
+    configure/make. Official PJSIP revision `15e9be5494d72811690eaba75a8cb6b79678cbfc` provides
+    Mbed TLS PSA lifetime, certificate parsing and TLS 1.3 fixes, and CSPRNG-backed SDES keys with
+    failure propagation. No custom Mbed TLS backend patch is used. No OpenSSL is
+    linked: bundled libsrtp uses internal crypto. DTLS-SRTP, AEAD-GCM/AES-CM-192 SRTP and PJSIP
+    SHA-256/SHA-512-256 digest authentication are unavailable. Keep Android CA/hostname verification.
     Each requested ABI directory is recreated and built from scratch, including dependency installations,
     PJSIP patches and JNI output. Shared sources are retained; there is no build fingerprinting/object reuse.
     Tarball SHA-256 checks remain. SWIG generates Java bindings and the C++ wrapper once per invocation;

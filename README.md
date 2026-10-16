@@ -220,7 +220,8 @@ configuration:
 
 ## Building from source
 
-Requirements: JDK 17+, Android SDK with NDK, `swig` (e.g. `brew install swig`).
+Requirements: JDK 17+, Android SDK with NDK, CMake, Python 3, SWIG (e.g. `brew install cmake swig`),
+and the usual configure/make tools.
 
 ```bash
 ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.sh   # once; outputs in git-ignored src/generated/
@@ -232,12 +233,21 @@ The default native build targets arm64-v8a. Match native ABIs to the app's Gradl
 
 ### Native dependencies
 
-The native build script builds OpenSSL, libopus, and PJSIP's Java/JNI bindings from pinned,
+The native build script builds Mbed TLS 3.6.7, libopus, and PJSIP's Java/JNI bindings from pinned,
 SHA-256-verified upstream tarballs and applies the patches in `sip-pjsua2/native/`.
+PJSIP is pinned to upstream development revision
+[`15e9be5494d72811690eaba75a8cb6b79678cbfc`](https://github.com/pjsip/pjproject/commit/15e9be5494d72811690eaba75a8cb6b79678cbfc)
+(2.17-dev), which includes Mbed TLS lifecycle/TLS 1.3 fixes and secure SRTP key generation.
+No local Mbed TLS backend patch is applied. The existing wildcard-certificate patch is retained;
+sound-device idle auto-close is now provided upstream.
+Mbed TLS uses CMake and the NDK toolchain; PJSIP and Opus retain their configure/make builds.
+Install CMake, Python 3, SWIG and the usual configure/make tools before building.
+Set `MBEDTLS_TARBALL=/path/to/mbedtls-3.6.7.tar.bz2` to reuse a downloaded release archive;
+otherwise the script downloads it. Use the full release archive, including its framework submodule.
 
 Tarballs and shared library source trees live directly under
-`sip-pjsua2/build/pjproject/` (override with `PJ_WORK`). Each ABI has `openssl-build/`, `opus-build/`,
-`prefix/{openssl,opus}/` and its own PJSIP source/build tree, since PJSIP generates target-specific
+`sip-pjsua2/build/pjproject/` (override with `PJ_WORK`). Each ABI has `mbedtls-build/`, `opus-build/`,
+`prefix/{mbedtls,opus}/` and its own PJSIP source/build tree, since PJSIP generates target-specific
 configuration and headers inside its source tree. Set, for example,
 `ABIS="arm64-v8a x86_64"` to build multiple targets sequentially; APK packaging still follows Gradle's ABI filters.
 Build native libraries for each ABI selected by the app's Gradle filters.
@@ -248,6 +258,13 @@ build fingerprints or incremental object caches. SWIG generates the Java binding
 invocation; the wrapper is compiled and linked separately for each ABI. New bindings are staged and published
 only after all requested ABIs succeed, preserving the previous output on a build failure. Do not run builds sharing the
 same work/output directories concurrently.
+
+Mbed TLS is built as static PIC libraries with pthread support and TLS 1.2/1.3. The upstream backend
+supplies secure random SDES-SRTP master keys, failing call setup if randomness fails. Bundled libsrtp uses its internal
+crypto, so OpenSSL is not linked. This profile supports SDES-SRTP; DTLS-SRTP, OpenSSL-dependent
+SRTP suites (AEAD-GCM and AES-CM-192), and PJSIP SHA-256/SHA-512-256 digest authentication are
+unavailable. SIP digest authentication uses MD5. Certificate chain and hostname verification
+continue to use the Android system CA bundle supplied by the app.
 
 ## Architecture
 
@@ -280,7 +297,7 @@ Copyright (C) 2026 sparkcyf
 
 This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version. See [LICENSE](LICENSE). As a special exception, linking with any library licensed under the Apache License, Version 2.0 is permitted, provided all other code complies with the GPL.
 
-Release APKs statically link pjsip (GPL-2.0-or-later), OpenSSL (Apache-2.0) and libopus (BSD-3-Clause); see
+Release APKs statically link pjsip (GPL-2.0-or-later), Mbed TLS (Apache-2.0) and libopus (BSD-3-Clause); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The corresponding source for every release is the tagged commit
 of this repository plus the pinned upstream tarballs fetched by `sip-pjsua2/native/build-pjsua2.sh`.
 
