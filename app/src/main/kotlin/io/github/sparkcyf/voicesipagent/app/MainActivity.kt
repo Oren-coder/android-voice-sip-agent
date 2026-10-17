@@ -38,6 +38,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -138,11 +139,7 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
             Text(h.session ?: "No active session")
         }
         SettingsSection(rt)
-        Section("Log") {
-            Text(log.takeLast(60).reversed().joinToString("\n"), fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp, lineHeight = 14.sp)
-        }
-        var advanced by remember { mutableStateOf(false) }
+        var advanced by rememberSaveable { mutableStateOf(false) }
         OutlinedButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Hide advanced settings" else "Advanced settings") }
         if (advanced) {
             Section("Platform integration") {
@@ -190,6 +187,10 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                 Text(h.lastSetupLog)
                 Text("Audio access and frame counters do not verify remote delivery. Verify both directions on this device.")
             }
+        }
+        Section("Log") {
+            Text(log.takeLast(60).reversed().joinToString("\n"), fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp, lineHeight = 14.sp)
         }
     }
 }

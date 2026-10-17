@@ -73,7 +73,8 @@ abstract class DialerRoleActivity : ComponentActivity() {
     }
 
     protected fun openConfiguration() = afterUnlock {
-        startActivity(Intent(this, MainActivity::class.java))
+        startActivity(Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
     }
 
     private fun afterUnlock(action: () -> Unit) {
