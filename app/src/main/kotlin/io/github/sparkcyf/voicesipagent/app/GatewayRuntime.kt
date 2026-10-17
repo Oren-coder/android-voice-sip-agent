@@ -54,6 +54,8 @@ data class HealthState(
     val privilegedDetail: String = "",
     val sip: EndpointStatus = EndpointStatus(false, "not configured"),
     val takeover: Boolean = true,
+    /** Gateway dependencies can run only after the foreground service has started. */
+    val gatewayRunning: Boolean = false,
     /** Takeover was switched off during a call; it takes effect when that call ends. */
     val takeoverOffPending: Boolean = false,
     val takeoverOnPending: Boolean = false,
@@ -122,7 +124,11 @@ class GatewayRuntime private constructor(context: Context) {
     private var bridge: CallBridge? = null
     private var echo: EchoEndpoint? = null
     private var started = false
-    private var pendingSettings: GatewaySettings? = null
+    private val _pendingSettings = MutableStateFlow<GatewaySettings?>(null)
+    val pendingSettingsFlow: StateFlow<GatewaySettings?> = _pendingSettings
+    private var pendingSettings: GatewaySettings?
+        get() = _pendingSettings.value
+        set(value) { _pendingSettings.value = value }
     private var restartPending = false
     private var loopbackPending: Boolean? = null
     private var setupPending = false
@@ -402,7 +408,8 @@ class GatewayRuntime private constructor(context: Context) {
         }
         val ready = !h.dialerChangeRunning && gatewayEnabled && access && audio && h.shizuku == ShizukuConnector.State.CONNECTED &&
             (h.loopbackTest || h.sip.ready)
-        _health.update { it.copy(callAccessReady = access, audioReady = audio, cellularReady = ready, readinessDetail = detail) }
+        _health.update { it.copy(gatewayRunning = gatewayEnabled, callAccessReady = access,
+            audioReady = audio, cellularReady = ready, readinessDetail = detail) }
         cellular.setReadiness(ready, detail)
         syncForegroundService()
     }

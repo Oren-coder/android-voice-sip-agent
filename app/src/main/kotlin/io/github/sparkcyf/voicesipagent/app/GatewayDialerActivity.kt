@@ -19,6 +19,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 
 /** Safe to display over the lockscreen: no configuration, caller numbers, or diagnostic logs. */
 class GatewayDialerActivity : DialerRoleActivity() {
@@ -53,7 +54,9 @@ class GatewayDialerActivity : DialerRoleActivity() {
                             Text(if (settings.takeover) "Turn takeover off" else "Turn takeover on")
                         }
                         Text("For manual calls, restore your usual phone app or choose one in system Settings.")
-                        if (health.holdsDialer) Button(onClick = ::switchDialer, enabled = !health.dialerChangeRunning) { Text("Restore previous dialer") }
+                        if (health.holdsDialer && settings.takeover && health.shizuku == ShizukuConnector.State.CONNECTED) {
+                            Button(onClick = ::switchDialer, enabled = !health.dialerChangeRunning) { Text("Restore previous dialer") }
+                        }
                         OutlinedButton(onClick = ::chooseDialerInSettings, enabled = !health.dialerChangeRunning) { Text("Choose dialer in Settings") }
                         if (health.dialerChangePending) OutlinedButton(onClick = ::cancelDialerChange) { Text("Cancel dialer change") }
                         if (!health.holdsDialer && health.dialerRoleAvailable) {
