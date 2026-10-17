@@ -52,7 +52,7 @@ Android 11 的兼容性尚未经过真机验证；其他机型的隐藏 API 和�
    ```
 
    正式版签名证书的 SHA-256 为 `b8fe38aa02f9657c6785fb6faeb20abb20deba410f9c643fcd93269b642850c4`。
-3. 打开 App，点 **Grant Shizuku** 并允许，App 会自动完成 setup。
+3. 打开 App，在 **Health** 中点 **Grant Shizuku** 并允许（若接管已关闭，请先开启），App 会自动完成 setup。
    Android 11 上，开启 **Take over calls** 也会将本 App 设为默认拨号器。
    较新版本通常以 InCallService 伴侣应用的身份与现有拨号器并行工作。
 4. 在 **Settings** 中填写 PBX 地址/端口、传输方式、SRTP、用户名、密码等，点 **Save & apply**。
@@ -62,7 +62,7 @@ Android 11 的兼容性尚未经过真机验证；其他机型的隐藏 API 和�
 
 通话访问模式、音频选项和拨号器恢复见[高级设置](#高级设置)。
 
-若要在手机旁监听，在通话开始前到 **Advanced settings** 关闭 **Mute local call output**。
+若要在手机旁监听，在通话开始前到 **Takeover** 关闭 **Mute call audio on this phone**。
 下行音频按手机当前的通话路由（听筒、扬声器或耳机）和音量播放。
 桥接期间本机麦克风仍保持静音，因此本地监听不会启用本机语音输入。
 
@@ -78,29 +78,34 @@ Android 11 的兼容性尚未经过真机验证；其他机型的隐藏 API 和�
 | User / password | PBX 上 trunk 的凭据 |
 | Cellular inbound → SIP target | 蜂窝来电时在 PBX 上呼叫的 DID；留空则使用 SIP 用户名 |
 | Allowed dial-out prefixes | 逗号分隔；留空表示允许拨出任何号码 |
-| Mute local call output | 开启：尝试静音通话输出。关闭：保留正常通话输出供本地监听。从下次通话生效；本机麦克风仍保持静音。 |
+
+点击 **Save & apply** 保存；通话中提交的修改会等待当前通话结束后生效。
+接管关闭时保存的 SIP 设置将在下次开启接管时使用。
 
 TLS 用 Android 系统 CA 库校验服务器证书链和主机名，仅支持 TLS 1.2/1.3，接受最左一级的 `*.` 通配证书（RFC 6125）。
 不做降级：TLS 失败就注册失败，每 30 s 重试。
 
+### 网关状态与恢复
+
+在 **Health** 中查看 setup 或注册错误。接管开启时，可在授权 Shizuku 后使用 **Re-run setup** 重新设置，
+或使用 **Reconnect SIP** 根据已保存的凭据重新注册。
+
 ### 高级设置
 
-高级设置默认折叠。**Call access** 决定网关如何获取和控制蜂窝通话：
+高级设置默认折叠。通常将 **Cellular audio** 保持为 Automatic。**Call access** 可选：
 
 | 选项 | 行为 |
 |---|---|
 | Automatic | Android 11 使用默认拨号器模式；Android 12 及以上默认使用伴侣模式，已持有拨号器角色时使用默认拨号器模式。 |
-| Alongside dialer（伴侣模式） | 与平常使用的电话 App 并行工作，保留其通话界面和默认拨号器角色。适用于 Android 12 及以上。 |
-| Default dialer（默认拨号器模式） | 开启接管时将网关设为默认电话 App。界面提供网关状态和恢复操作；需要手动通话时，应切回平常使用的拨号器。 |
+| Alongside dialer（伴侣模式） | 保留平常使用的电话 App 和通话界面，仅适用于 Android 12 及以上。 |
+| Default dialer（默认拨号器模式） | 下次开启接管时将网关设为默认电话 App；手动通话时请切回平常使用的拨号器。 |
 
-仅修改此选项不会切换默认电话 App。默认拨号器模式下，开启接管会取得角色；关闭时恢复原来的拨号器，
-除非开启 **Keep default-dialer role when gateway is off**。高级设置也提供 **Become default dialer**、
-**Restore previous dialer** 和 **Choose dialer in Settings**。角色切换会等待当前通话结束。
-两种通话访问模式都仍需 Shizuku 提供通话音频。
+选择模式不会切换默认电话 App。默认拨号器模式在关闭接管时恢复原来的拨号器，
+除非开启 **Keep this app as the default phone app when gateway is off**。
+可用 **Make default phone app** 主动切换，或用 **Choose dialer in Settings** 恢复拨号器。
 
-**Cellular audio** 可选 Automatic、Direct telephony 和 Call redirection，通常保留 Automatic 即可。
-其他选项包括本机通话输出、回声测试（接听并回放蜂窝来电的声音）、调试日志和诊断。
-实现细节见英文[通话访问与接管说明](TECHNICAL.md#call-access-and-takeover)和
+**Cellular audio** 还可选 Direct telephony 和 Call redirection（Android 13 及以上）。
+角色控制、测试选项和诊断详见英文[通话访问与接管说明](TECHNICAL.md#call-access-and-takeover)和
 [音频格式与路由说明](TECHNICAL.md#audio-formats-and-routing)。
 
 ### adb 控制

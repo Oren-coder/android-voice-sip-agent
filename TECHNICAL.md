@@ -10,9 +10,12 @@ Detailed usage, build, and implementation notes for Voice SIP Agent. See the
 
 ## Call access and takeover
 
-Open the app, tap **Grant Shizuku** and allow access. The app then runs its setup automatically (appops,
-Telecom companion override where applicable, Doze allowlist, runtime permissions) and repeats it after upgrades.
-A health check runs every 60 s and retries setup while idle if takeover is enabled and companion call access is unavailable.
+With **Take over calls** enabled, tap **Grant Shizuku** in Health and allow access. The app then runs its setup
+automatically (appops, Telecom companion override where applicable, Doze allowlist, runtime permissions)
+and repeats it after upgrades.
+A health check runs every 60 s while takeover and the foreground service are active, and retries setup while
+idle if companion call access is unavailable. SIP, bridging, the Shizuku helper, and network monitoring also
+start only after the service enters foreground; opening the configuration with takeover saved off leaves them stopped.
 
 On Android 11, turn **Take over calls** on (or tap **Enable takeover**) to grant default-dialer call access.
 With Shizuku connected, this saves your previous dialer and changes the role directly, without the
@@ -26,24 +29,46 @@ dialer and acquires the role. Switching off waits for current calls and bridge c
 and companion integration and restores your previous dialer through Shizuku.
 If that dialer is unavailable, the app attempts the system fallback. **Choose dialer in Settings**
 remains available in Advanced settings and appears on restoration failure for manual recovery.
-**Keep default-dialer role when gateway is off** in Advanced disables automatic restoration on the next
-switch-off. Independent **Become default dialer** and **Restore previous dialer** actions are also in Advanced.
+**Keep this app as the default phone app when gateway is off** in Advanced disables automatic restoration on
+the next switch-off. That switch and **Make default phone app** are enabled in default-dialer mode.
+**Restore previous dialer** is shown in Takeover when the app holds the role, takeover is on, and Shizuku is
+connected. With takeover off or Shizuku unavailable, use **Choose dialer in Settings**.
 Role changes made in Settings leave takeover unchanged; a pending
 request will not replace a different dialer selected while it was waiting. The saved return dialer
 survives process restarts, but pending role changes are never replayed automatically after restart.
 Toggling takeover again cancels the pending handoff; existing calls keep their bridge.
 
 On Android 12+, Automatic returns to companion mode after restoration. Select **Default dialer** in Advanced
-to acquire the role on each switch-on.
+to acquire the role on each switch-on. **Alongside dialer** is disabled on Android 11. If this app currently
+holds the role, restore your usual phone app before using companion mode. Both modes require Shizuku for audio.
+Switching takeover off waits for owned calls and bridge cleanup, then unregisters SIP, destroys the native
+pjsua2 library, cancels health/dialer polling, unregisters network monitoring, and releases this app's Shizuku
+helper after handoff cleanup. The shared Shizuku server keeps running. Switching on starts a new gateway lifetime.
 In companion mode, switching takeover off also stops the foreground service and removes its notification;
-idle gateway standby keeps both running. In dialer mode, the service runs while this app is the default
-dialer. Owned calls finish cleanup before the service stops.
+idle gateway standby keeps both running. In dialer mode, the service keeps a reminder visible while this app
+is the default dialer, even with gateway work stopped. Service destruction also releases gateway resources
+and cancels pending role changes; cleanup does not acquire or restore a dialer role.
 
 Advanced settings are collapsed by default. They contain call-access and cellular-audio choices, dialer-role
-controls and retention, automatic handset suppression when supported, loopback, debug logging, and diagnostics.
-The call log remains visible outside Advanced.
+acquisition and retention, system dialer settings, and diagnostics. **Mute call audio on this phone** is in
+Takeover, **Echo incoming calls (test)** is in Call, and **pjsip debug log** is in Settings. The log remains
+visible below Advanced. While takeover is on, echo testing answers incoming cellular calls and echoes the
+caller's audio, bypassing the PBX. Changes wait for current calls to end; **Disable echo test** restores normal bridging.
+
+Health indicators are neutral while off; setup and recovery controls require the gateway to be running.
+**Call access** appears in Takeover with dialer status and recovery actions. **Re-run setup** requires the
+connected helper; **Reconnect SIP** requires configured SIP credentials. Setup, SIP restart, call-access and
+audio-method changes wait for active calls and bridge cleanup before applying.
+
+The SIP form distinguishes **Unsaved changes** from submitted **Changes pending until calls end**. Tap
+**Save & apply** to submit edits; active calls and bridge cleanup delay their application. Saved SIP settings
+do not start registration while takeover is off. The **pjsip debug log** switch takes effect immediately.
 
 ## Audio formats and routing
+
+**Cellular audio** defaults to Automatic, which tries call redirection first, then direct telephony if needed.
+Call redirection requires Android 13+ and is disabled on older versions. Audio-method changes made during a
+call wait until calls finish and affect the next call.
 
 The default pjsua2 SIP stack prefers mono Opus (16 kHz PCM, 20 ms frames, 20 kbit/s target), with G.711
 (PCMU/PCMA) fallback. Android capture/injection and the bridge use 16 kHz mono PCM for pjsua2, and 8 kHz
@@ -67,7 +92,7 @@ changes when the tap closes and preserves an already-muted stream. Device policy
 audio directions still need testing with suppression enabled. If the helper is forcibly killed, stream
 mute can remain active; raising the call volume can unmute it.
 
-For local listening, turn **Mute local call output** off in **Advanced settings** before the call.
+For local listening, turn **Mute call audio on this phone** off in **Takeover** before the call.
 Downlink output follows the phone's current call audio route (earpiece, speaker, or headset) and volume.
 The handset microphone stays muted while bridging, so local listening does not enable local speech.
 

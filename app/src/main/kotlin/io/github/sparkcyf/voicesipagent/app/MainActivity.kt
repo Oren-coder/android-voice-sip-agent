@@ -74,6 +74,7 @@ class MainActivity : DialerRoleActivity() {
 private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit,
     chooseDialer: () -> Unit, cancelDialer: () -> Unit, setTakeover: (Boolean) -> Unit, roleMessage: String) {
     val h by rt.health.collectAsState()
+    val pendingSettings by rt.pendingSettingsFlow.collectAsState()
     val log by AppLog.tail.collectAsState()
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -88,96 +89,143 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                     h.takeoverOnPending -> "Turning on after current calls end"
                     h.dialerChangeRunning -> "Changing the default dialer"
                     h.dialerChangePending -> if (h.dialerChangeAcquire) "Waiting to become the default dialer" else "Waiting to restore your previous dialer"
-                    cur.takeover -> if (h.cellularReady) "Calls are bridged to the PBX" else h.readinessDetail
-                    h.holdsDialer && cur.keepDefaultDialer -> "Gateway off; keeping the default-dialer role"
+                    cur.takeover -> if (h.cellularReady && !h.loopbackTest) "Ready to bridge calls to the PBX" else h.readinessDetail
+                    h.holdsDialer && cur.keepDefaultDialer -> "Gateway off; this app remains the default phone app"
                     h.holdsDialer -> "Gateway off; dialer restoration needs attention"
                     else -> "Gateway off; calls stay with your dialer"
                 }
             }
-            if (h.effectiveCallAccess == CallAccess.DIALER) {
-                Text("Turning on requests the default-dialer role. Turning off restores your previous dialer unless you keep the role in Advanced settings.",
-                    style = MaterialTheme.typography.bodySmall)
+            if (h.takeover || h.holdsDialer) {
+                Check("Call access", h.callAccessReady,
+                    if (h.effectiveCallAccess == CallAccess.DIALER) {
+                        if (h.holdsDialer) "This app is the default dialer" else "Default dialer selection required"
+                    } else if (Build.VERSION.SDK_INT == 30) "Alongside-dialer access is unavailable on Android 11"
+                    else "Alongside your current dialer")
             }
-            if (h.settingsPending) Text("Settings will apply after current calls end")
-        }
-        Section("Health") {
-            val p = h.privileged
-            Check("Shizuku", h.shizuku == ShizukuConnector.State.CONNECTED, "${h.shizuku} ${h.shizukuDetail}")
-            Check("Call access", h.callAccessReady,
-                if (h.effectiveCallAccess == CallAccess.DIALER) "Default dialer" else "Alongside your dialer")
-            Check("Call audio access", h.audioReady)
-            Check("Doze allowlisted", p?.get(HealthKeys.DOZE_ALLOWLISTED) == true)
-            Check("SIP registration", h.sip.ready, h.sip.detail)
-            Text(h.readinessDetail, style = MaterialTheme.typography.bodySmall)
+            if (h.holdsDialer || h.effectiveCallAccess == CallAccess.DIALER) {
+                Text(when {
+                    !h.holdsDialer -> "Enable takeover to make this app the default phone app."
+                    cur.keepDefaultDialer -> "This app stays the default when takeover is off."
+                    else -> "Turning takeover off tries to restore your previous phone app."
+                }, style = MaterialTheme.typography.bodySmall)
+            }
             if (h.effectiveCallAccess == CallAccess.DIALER && !h.holdsDialer) {
-                Text("Default-dialer mode bridges calls through the PBX. For manual calling, switch back to your usual dialer.")
                 if (cur.takeover && !h.dialerChangePending) {
                     Button(onClick = { setTakeover(true) }, enabled = h.dialerRoleAvailable && !h.dialerChangeRunning) { Text("Enable takeover") }
                 }
                 if (!h.dialerRoleAvailable) Text("Default dialer selection is unavailable on this device.")
             }
             if (roleMessage.isNotEmpty()) Text(roleMessage)
-            if (h.dialerChangeFailed || (h.holdsDialer && !cur.takeover && !cur.keepDefaultDialer)) {
-                if (h.holdsDialer) OutlinedButton(onClick = switchDialer, enabled = !h.dialerChangeRunning) { Text("Restore previous dialer") }
+            if (h.holdsDialer || h.dialerChangeFailed) {
+                if (h.holdsDialer && cur.takeover && h.shizuku == ShizukuConnector.State.CONNECTED) {
+                    OutlinedButton(onClick = switchDialer, enabled = !h.dialerChangeRunning) { Text("Restore previous dialer") }
+                }
                 OutlinedButton(onClick = chooseDialer, enabled = !h.dialerChangeRunning) { Text("Choose dialer in Settings") }
             }
             if (h.dialerChangePending) OutlinedButton(onClick = cancelDialer) { Text("Cancel dialer change") }
+            Toggle("Mute call audio on this phone", cur.muteEarpiece, { rt.setMuteEarpiece(it) }) {
+                val unavailable = h.privileged != null &&
+                    (h.privileged?.get(HealthKeys.LOCAL_SUPPRESSION) != true || !h.audioReady)
+                if (cur.muteEarpiece && unavailable)
+                    "Muting is unavailable with the current setup. The phone microphone remains muted during gateway calls."
+                else
+                    "When enabled, attempts to silence the earpiece or speaker. The phone microphone remains muted during gateway calls. Changes apply to the next call."
+            }
+            if (h.settingsPending && pendingSettings?.hasSameSipSettings(cur) != false) {
+                Text("Changes pending until calls end", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Section("Health") {
+            val p = h.privileged
+            val actionsEnabled = h.gatewayRunning && cur.takeover && !h.dialerChangeRunning
+            Text(when {
+                h.takeover -> h.readinessDetail
+                h.takeoverOnPending -> "Health checks will start after current calls end."
+                else -> "Health checks are paused while takeover is off."
+            }, style = MaterialTheme.typography.bodySmall)
+            Check("Shizuku", h.shizuku == ShizukuConnector.State.CONNECTED,
+                if (h.takeover) "${h.shizuku} ${h.shizukuDetail}" else "Stopped while takeover is off")
+            Check("Call audio access", h.audioReady)
+            Check("Doze allowlisted", p?.get(HealthKeys.DOZE_ALLOWLISTED) == true)
+            Check("SIP registration", h.sip.ready,
+                if (h.takeover) h.sip.detail else "Stopped while takeover is off")
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (h.shizuku == ShizukuConnector.State.PERMISSION_REQUIRED || h.shizuku == ShizukuConnector.State.PERMISSION_DENIED) {
-                    Button(onClick = { rt.shizuku.requestPermission() }) { Text("Grant Shizuku") }
+                    Button(onClick = { rt.shizuku.requestPermission() }, enabled = actionsEnabled) { Text("Grant Shizuku") }
                 }
-                OutlinedButton(onClick = { rt.runSetup() }) { Text("Re-run setup") }
-                OutlinedButton(onClick = { rt.restartSip() }) { Text("Re-register") }
+                OutlinedButton(onClick = { rt.runSetup() },
+                    enabled = actionsEnabled && h.shizuku == ShizukuConnector.State.CONNECTED) { Text("Re-run setup") }
+                OutlinedButton(onClick = { rt.restartSip() },
+                    enabled = actionsEnabled && cur.sipConfigured) { Text("Reconnect SIP") }
             }
         }
         Section("Call") {
             Text(h.calls.summary)
             Text(h.session ?: "No active session")
+            Toggle("Echo incoming calls (test)", h.loopbackTest, { rt.setLoopbackTest(it) }) {
+                "While the gateway is on, answers incoming cellular calls and echoes the caller's audio instead of connecting the PBX. Changes apply after the current call ends."
+            }
+            if (h.loopbackTest) {
+                Text("Echo test enabled", style = MaterialTheme.typography.titleSmall)
+                Button(onClick = { rt.setLoopbackTest(false) }) { Text("Disable echo test") }
+            }
         }
         SettingsSection(rt)
         var advanced by rememberSaveable { mutableStateOf(false) }
         OutlinedButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Hide advanced settings" else "Advanced settings") }
         if (advanced) {
             Section("Platform integration") {
-                Choice("Call access", listOf(CallAccess.AUTO, CallAccess.COMPANION, CallAccess.DIALER), cur.callAccess,
-                    { when (it) { CallAccess.AUTO -> "Automatic"; CallAccess.COMPANION -> "Alongside dialer"; else -> "Default dialer" } }) {
+                val preferredCallAccess = pendingSettings?.callAccess ?: cur.callAccess
+                Choice("Call access", listOf(CallAccess.AUTO, CallAccess.COMPANION, CallAccess.DIALER), preferredCallAccess,
+                    { when (it) { CallAccess.AUTO -> "Automatic"; CallAccess.COMPANION -> "Alongside dialer"; else -> "Default dialer" } },
+                    enabled = { it != CallAccess.COMPANION || Build.VERSION.SDK_INT >= 31 }) {
                     rt.applySettings(cur.copy(callAccess = it))
                 }
-                Toggle("Keep default-dialer role when gateway is off", cur.keepDefaultDialer,
-                    { rt.setKeepDefaultDialer(it) }) {
-                    "Applies the next time takeover is switched off. Restore manually below when needed."
+                val callAccessHint = when (preferredCallAccess) {
+                    CallAccess.AUTO -> if (Build.VERSION.SDK_INT < 31)
+                        "Android 11 requires this app as the default phone app."
+                    else "Works alongside your phone app unless this app is the default."
+                    CallAccess.COMPANION -> when {
+                        Build.VERSION.SDK_INT < 31 -> "Requires Android 12 or later."
+                        h.holdsDialer -> "Restore your usual phone app to use this mode."
+                        else -> "Keeps your current phone app."
+                    }
+                    else -> if (h.holdsDialer) null
+                        else "Enable takeover or tap Make default phone app to switch."
                 }
-                if (h.holdsDialer) {
-                    OutlinedButton(onClick = switchDialer, enabled = !h.dialerChangeRunning) { Text("Restore previous dialer") }
-                } else if (h.dialerRoleAvailable) {
-                    OutlinedButton(onClick = requestDialer, enabled = !h.dialerChangeRunning) { Text("Become default dialer") }
+                if (callAccessHint != null) Text(callAccessHint, style = MaterialTheme.typography.bodySmall)
+                if (preferredCallAccess != cur.callAccess) {
+                    Text("Applies after current calls end.", style = MaterialTheme.typography.bodySmall)
                 }
-                OutlinedButton(onClick = chooseDialer, enabled = !h.dialerChangeRunning) { Text("Choose dialer in Settings") }
+                val dialerControlsEnabled = h.effectiveCallAccess == CallAccess.DIALER && !h.dialerChangeRunning
+                Toggle("Keep this app as the default phone app when gateway is off", cur.keepDefaultDialer,
+                    { rt.setKeepDefaultDialer(it) }, enabled = dialerControlsEnabled) {
+                    "When disabled, turning takeover off tries to restore your previous phone app."
+                }
+                if (!h.holdsDialer && h.dialerRoleAvailable) {
+                    OutlinedButton(onClick = requestDialer, enabled = dialerControlsEnabled) { Text("Make default phone app") }
+                }
+                OutlinedButton(onClick = chooseDialer) { Text("Choose dialer in Settings") }
                 Text("Manual dialer selection leaves takeover unchanged. Selecting Default dialer above applies to the next switch-on.",
                     style = MaterialTheme.typography.bodySmall)
-                Choice("Cellular audio", listOf(AudioMethod.AUTO, AudioMethod.LEGACY, AudioMethod.OFFICIAL), cur.audioMethod,
+                val preferredAudioMethod = pendingSettings?.audioMethod ?: cur.audioMethod
+                Choice("Cellular audio", listOf(AudioMethod.AUTO, AudioMethod.LEGACY, AudioMethod.OFFICIAL), preferredAudioMethod,
                     { when (it) { AudioMethod.AUTO -> "Automatic"; AudioMethod.LEGACY -> "Direct telephony"; else -> "Call redirection" } },
                     enabled = { it != AudioMethod.OFFICIAL || Build.VERSION.SDK_INT >= 33 }) {
                     rt.applySettings(cur.copy(audioMethod = it))
                 }
-                Toggle("Mute local call output", cur.muteEarpiece, { rt.setMuteEarpiece(it) }) {
-                    val backendAvailable = when (cur.audioMethod) {
-                        AudioMethod.LEGACY -> h.privileged?.get(HealthKeys.DIRECT_AUDIO) == true
-                        AudioMethod.OFFICIAL -> h.privileged?.get(HealthKeys.REDIRECT_AUDIO) == true
-                        else -> true
-                    }
-                    if (!cur.muteEarpiece)
-                        "Keeps normal call output for local listening; microphone stays muted. Applies from next call."
-                    else if (h.privileged?.get(HealthKeys.LOCAL_SUPPRESSION) == true && backendAvailable)
-                        "Mutes call output when supported; applies from next call"
-                    else "Unavailable with the current platform or audio method"
+                Text(when (preferredAudioMethod) {
+                    AudioMethod.AUTO -> "Tries call redirection first, then directly configure Telephony device if needed."
+                    AudioMethod.LEGACY -> "Captures call audio and sends outgoing audio through the Telephony device."
+                    else -> "Uses Android 13+ APIs to capture and inject cellular call audio."
+                } + " Changes apply to the next call.", style = MaterialTheme.typography.bodySmall)
+                if (preferredAudioMethod != cur.audioMethod) {
+                    Text("Applies after current calls end.", style = MaterialTheme.typography.bodySmall)
                 }
-                Toggle("Loopback test (echo inbound calls)", h.loopbackTest, { rt.setLoopbackTest(it) }) { "Echoes incoming calls instead of connecting the PBX" }
-                Toggle("pjsip debug log", cur.sipDebugLog, { rt.setSipDebugLog(it) }) { "Info-level logs with masked numbers" }
             }
             Section("Diagnostics") {
                 Text("Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT}")
@@ -199,6 +247,8 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
 private fun SettingsSection(rt: GatewayRuntime) {
     // Re-seed the form whenever settings change elsewhere (e.g. adb provisioning).
     val cur by rt.settingsFlow.collectAsState()
+    val pending by rt.pendingSettingsFlow.collectAsState()
+    val health by rt.health.collectAsState()
     var server by remember(cur) { mutableStateOf(cur.server) }
     var port by remember(cur) { mutableStateOf(cur.port.toString()) }
     var user by remember(cur) { mutableStateOf(cur.username) }
@@ -210,11 +260,21 @@ private fun SettingsSection(rt: GatewayRuntime) {
     var transport by remember(cur) { mutableStateOf(SipTransport.of(cur.sipTransport) ?: SipTransport.UDP) }
     var srtp by remember(cur) { mutableStateOf(SrtpPolicy.of(cur.srtp) ?: SrtpPolicy.OPTIONAL) }
     val builtin = stack == SipStack.BUILTIN
+    val draft = cur.copy(
+        server = server, port = port.toIntOrNull() ?: transport.defaultPort, username = user, password = password,
+        inboundTarget = target, allowedPrefixes = prefixes, domain = domain,
+        sipStack = stack, sipTransport = transport.id, srtp = srtp.id,
+    )
+    val unsaved = !draft.hasSameSipSettings(pending ?: cur) || port.toIntOrNull() == null
+    val sipPending = pending?.hasSameSipSettings(cur) == false
     Section("Settings") {
         Choice("SIP stack", SipStack.entries, stack, { it.id }) {
             stack = it
             // The built-in stack is UDP only.
-            if (it == SipStack.BUILTIN) transport = SipTransport.UDP
+            if (it == SipStack.BUILTIN) {
+                if (port == transport.defaultPort.toString()) port = SipTransport.UDP.defaultPort.toString()
+                transport = SipTransport.UDP
+            }
         }
         Choice("Transport", SipTransport.entries, transport, { it.id }, enabled = { !builtin || it == SipTransport.UDP }) {
             // Follow the default port when it was still the previous transport's default.
@@ -234,17 +294,26 @@ private fun SettingsSection(rt: GatewayRuntime) {
         )
         Field("Cellular inbound -> SIP target (blank = username)", target) { target = it }
         Field("Allowed dial-out prefixes (comma separated, empty = any)", prefixes) { prefixes = it }
-        Button(onClick = {
-            rt.applySettings(
-                cur.copy(
-                    server = server, port = port.toIntOrNull() ?: transport.defaultPort, username = user, password = password,
-                    inboundTarget = target, allowedPrefixes = prefixes, domain = domain,
-                    sipStack = stack, sipTransport = transport.id, srtp = srtp.id,
-                ),
-            )
-        }) { Text("Save & apply") }
+        if (unsaved) Text("Unsaved changes", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary)
+        if (sipPending) Text("Changes pending until calls end", style = MaterialTheme.typography.bodySmall)
+        Button(onClick = { rt.applySettings(draft) }) { Text("Save & apply") }
+        if (health.calls.count > 0 || health.session != null) {
+            if (!sipPending) Text("Saved changes apply after the current call ends.", style = MaterialTheme.typography.bodySmall)
+        } else if (!cur.takeover) {
+            Text("Saved SIP settings are used when takeover is next enabled.", style = MaterialTheme.typography.bodySmall)
+        }
+        Toggle("pjsip debug log", cur.sipDebugLog, { rt.setSipDebugLog(it) }) {
+            "Info-level logs with masked numbers"
+        }
     }
 }
+
+/** Gateway preferences do not count as edits to the SIP form. */
+private fun GatewaySettings.hasSameSipSettings(other: GatewaySettings): Boolean =
+    server == other.server && port == other.port && username == other.username && password == other.password &&
+        inboundTarget == other.inboundTarget && allowedPrefixes == other.allowedPrefixes && domain == other.domain &&
+        sipStack == other.sipStack && sipTransport == other.sipTransport && srtp == other.srtp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -273,13 +342,15 @@ private fun <T> Choice(
 }
 
 @Composable
-private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit, detail: () -> String) {
+private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit,
+    enabled: Boolean = true, detail: () -> String) {
+    val color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.38f)
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(label)
-            Text(detail(), style = MaterialTheme.typography.bodySmall)
+            Text(label, color = color)
+            Text(detail(), style = MaterialTheme.typography.bodySmall, color = color)
         }
-        Switch(checked = checked, onCheckedChange = onChange)
+        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
     }
 }
 

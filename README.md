@@ -60,7 +60,8 @@ Emergency numbers are always refused and are never dialed through the gateway.
 
    The SHA-256 digest of the release signing certificate is
    `b8fe38aa02f9657c6785fb6faeb20abb20deba410f9c643fcd93269b642850c4`.
-3. Open the app, tap **Grant Shizuku** and allow access. Setup runs automatically.
+3. Open the app, enable takeover if off, then tap **Grant Shizuku** in **Health** and allow access.
+   Setup runs automatically.
    On Android 11, enabling **Take over calls** also makes this app the default dialer.
    Newer versions normally work alongside your existing dialer as an InCallService companion app.
 4. Fill in **Settings** (PBX host/port, transport, SRTP, user, password, …) and tap **Save & apply**.
@@ -70,7 +71,7 @@ Emergency numbers are always refused and are never dialed through the gateway.
 
 See [Advanced settings](#advanced-settings) for call-access modes, audio choices, and dialer recovery.
 
-For local listening, turn **Mute local call output** off in **Advanced settings** before the call.
+For local listening, turn **Mute call audio on this phone** off in **Advanced settings** before the call.
 Downlink output follows the phone's current call audio route (earpiece, speaker, or headset) and volume.
 The handset microphone stays muted while bridging, so local listening does not enable local speech.
 
@@ -86,33 +87,37 @@ The handset microphone stays muted while bridging, so local listening does not e
 | User / password | Trunk credentials on the PBX |
 | Cellular inbound → SIP target | DID dialed on the PBX for incoming cellular calls; blank = the SIP user name |
 | Allowed dial-out prefixes | Comma-separated; empty = any number may be dialed out |
-| Mute local call output | On: attempts to silence call output. Off: keeps normal call output for local listening. Applies from next call; the handset microphone stays muted. |
+
+Tap **Save & apply**; changes wait for current calls to end. With takeover off, saved SIP settings are
+used when takeover is next enabled.
 
 TLS validates the server certificate chain and host name against the Android system CA store (TLS 1.2/1.3 only)
 and accepts `*.` wildcard certificates in the left-most label (RFC 6125). There is no downgrade: if TLS fails,
 registration fails and is retried every 30 s.
 
+### Gateway status and recovery
+
+Check **Health** for setup or registration errors. With takeover on, use **Re-run setup** after granting
+Shizuku access, or **Reconnect SIP** to retry registration with saved credentials.
+
 ### Advanced settings
 
-Advanced settings are collapsed by default. **Call access** controls how the gateway receives and manages
-cellular calls:
+Advanced settings are collapsed by default. Leave **Cellular audio** on Automatic for normal use.
+**Call access** offers these modes:
 
 | Choice | Behavior |
 |---|---|
 | Automatic | Uses default-dialer mode on Android 11; on Android 12+, uses companion mode unless this app already holds the dialer role. |
-| Alongside dialer (companion) | Works alongside your usual phone app, which keeps its call UI and default-dialer role. Available on Android 12+. |
-| Default dialer | Makes the gateway the default phone app when takeover is enabled. Its UI provides gateway status and recovery; switch back to your usual dialer for manual calling. |
+| Alongside dialer (companion) | Keeps your usual phone app and call UI. Android 12+ only. |
+| Default dialer | Makes the gateway the default phone app on the next takeover switch-on. Switch back to your usual dialer for manual calling. |
 
-Changing this choice alone does not change the default phone app. In default-dialer mode, switching takeover
-on acquires the role; switching off restores the previous dialer unless **Keep default-dialer role when gateway
-is off** is enabled. Advanced also provides **Become default dialer**, **Restore previous dialer**, and
-**Choose dialer in Settings**. Role changes wait for current calls to end. Both call-access modes still need
-Shizuku for call audio.
+Selecting a mode does not change your default phone app. Default-dialer mode restores the previous dialer
+on switch-off unless **Keep this app as the default phone app when gateway is off** is enabled.
+Use **Make default phone app** for an explicit switch, or **Choose dialer in Settings** for recovery.
 
-**Cellular audio** offers Automatic, Direct telephony, and Call redirection; leave it on Automatic for normal
-use. Other options control local call output, loopback (answers and echoes incoming calls), debug logging,
-and diagnostics. See [call access and takeover](TECHNICAL.md#call-access-and-takeover) and
-[audio formats and routing](TECHNICAL.md#audio-formats-and-routing) for implementation details.
+**Cellular audio** also offers Direct telephony and Call redirection (Android 13+). See
+[call access and takeover](TECHNICAL.md#call-access-and-takeover) and
+[audio formats and routing](TECHNICAL.md#audio-formats-and-routing) for role controls, test options, and diagnostics.
 
 ### adb control
 
