@@ -139,9 +139,13 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     audio quality. A possible future optimization is a longer maximum wait in PJMEDIA's
     `pjmedia/src/pjmedia/endpoint.c` `worker_proc`: ready sockets wake the wait early. This requires
     a native rebuild and device validation of call startup, audio timing, and shutdown.
-    Takeover-off stops the endpoint, drains deferred wrapper deletions, and destroys
-    the native library on that thread. Its timers, event thread, sockets, and null-device clock stop;
-    switch-on creates a new library lifetime. Physical off/on cycling remains a device validation check.
+    Blocking native initialization and DNS run on a separate serialized `sip-startup` executor whose
+    thread expires after one idle second. Takeover-off cancels pending account creation and queues
+    library teardown there, after outstanding initialization/DNS and before replacement startup.
+    Teardown drains deferred wrapper deletions and destroys the native library on the `pjsua` thread.
+    Native cleanup can finish after gateway controls return; initialization/DNS is not interrupted.
+    Its timers, event thread, sockets, and null-device clock then stop; switch-on creates a new library
+    lifetime. Physical off/on cycling remains a device validation check.
   - **No Android sound-device backend is compiled in** — only the null sound device, so pjsua never touches
     AudioManager or the audio mode. Audio enters/leaves the conference bridge through `AudioMediaPort`
     (`ConfPort`, 16 kHz / 20 ms, no EC). Opus uses 16 kHz mono PCM (20 kbit/s target);
@@ -155,8 +159,10 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   - SWIG objects (Call/Account/AudioMediaPort) must be `delete()`d explicitly on the pjsua thread, and never from
     inside their own callback (`finish()` defers the delete to the next loop). `Account`: `shutdown()` before
     `delete()`.
-  - `stop()` waits for the un-REGISTER response (≤1.5 s): the new account reuses the same Contact, and a late
-    un-REGISTER would remove the new binding.
+  - `stop()` attempts un-REGISTER even while registration is pending and waits for a successful
+    zero-expiry response (≤1.5 s): the new account reuses the same Contact, and a late un-REGISTER
+    could remove the new binding. If the native unregister request throws, cleanup skips the wait;
+    unregistration remains best effort.
   - Build patches (`native/`): `config_site.h`, `pjsua2-java-ext.i` (bulk-copy typemap for ByteVector; must come
     before `%template(ByteVector)`; SWIG director threads stay attached), `pjsua2-java-profile.i` (feature-group
     exclusions applied after upstream director declarations; retain Account/Call/AudioMediaPort/LogWriter

@@ -19,7 +19,9 @@ import org.pjsip.pjsua2.pjmedia_srtp_use
 import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -35,7 +37,7 @@ class PjsipEndpoint(
 
     private val statusListeners = CopyOnWriteArrayList<EndpointStatusListener>()
     @Volatile private var incomingHandler: IncomingCallHandler? = null
-    @Volatile override var status: EndpointStatus = EndpointStatus(false, "stopped")
+    @Volatile override var status: EndpointStatus = STOPPED
         private set
     private val ids = AtomicInteger(1)
 
@@ -59,22 +61,33 @@ class PjsipEndpoint(
 
     // ------------------------------------------------------------ lifecycle
 
-    /** Loads pjsua on first use (throws if the native library cannot start), then registers. */
+    /** Starts asynchronously so native initialization and DNS cannot block gateway controls. */
     fun start() {
-        PjsuaLib.ensureStarted(log)
-        val addrs = runCatching { InetAddress.getAllByName(config.server).toSet() }
-            .onFailure { log.warn("cannot resolve ${config.server}: ${it.message}") }
-            .getOrDefault(emptySet())
-        PjsuaLib.post {
-            serverAddrs = addrs
+        setStatus(EndpointStatus(false, "registering"))
+        startup.execute {
+            if (stopped) return@execute
             try {
-                createAccount()
-                setStatus(EndpointStatus(false, "registering"))
-                rtpCheck = PjsuaLib.every(5000) { calls.values.toList().forEach { it.checkRtp(System.currentTimeMillis()) } }
-                log.info("pjsua2 endpoint started: $config")
-            } catch (e: Exception) {
-                log.warn("account setup failed", e)
-                setStatus(EndpointStatus(false, "setup failed: ${e.message}"))
+                PjsuaLib.ensureStarted(log)
+                if (stopped) return@execute
+                val addrs = runCatching { InetAddress.getAllByName(config.server).toSet() }
+                    .onFailure { log.warn("cannot resolve ${config.server}: ${it.message}") }
+                    .getOrDefault(emptySet())
+                if (stopped) return@execute
+                PjsuaLib.post {
+                    if (stopped) return@post
+                    serverAddrs = addrs
+                    try {
+                        createAccount()
+                        rtpCheck = PjsuaLib.every(5000) { calls.values.toList().forEach { it.checkRtp(System.currentTimeMillis()) } }
+                        log.info("pjsua2 endpoint started: $config")
+                    } catch (e: Exception) {
+                        log.warn("account setup failed", e)
+                        setStatus(EndpointStatus(false, "setup failed: ${e.message}"))
+                    }
+                }
+            } catch (e: Throwable) {
+                log.warn("SIP start failed", e)
+                setStatus(EndpointStatus(false, "start failed: ${e.message}"))
             }
         }
     }
@@ -84,27 +97,25 @@ class PjsipEndpoint(
      * port is closed too (after the unregister completes); otherwise it is kept for the next endpoint.
      */
     fun stop(timeoutMs: Long = 2000, releaseTransport: Boolean = true) {
+        stopped = true
+        setStatus(STOPPED)
         if (!PjsuaLib.running) return
         val done = CountDownLatch(1)
         PjsuaLib.post {
             try {
-            stopped = true
-            rtpCheck?.cancel(false)
-            calls.values.toList().forEach { it.doHangup(HangupCause.NORMAL) }
-            account?.let { acc ->
-                // Wait for the unregister to complete: a successor account reuses the same Contact, and
-                // a late unregister would remove the binding it just refreshed.
-                if (status.ready) {
-                    runCatching { acc.setRegistration(false) }
-                    val deadline = System.currentTimeMillis() + 1500
-                    while (!unregistered && System.currentTimeMillis() < deadline) PjsuaLib.ep.libHandleEvents(20)
+                rtpCheck?.cancel(false)
+                calls.values.toList().forEach { it.doHangup(HangupCause.NORMAL) }
+                account?.let { acc ->
+                    // Registration may still be pending. Wait for an accepted unregister before a
+                    // successor reuses the same Contact, or a late unregister could remove its binding.
+                    if (runCatching { acc.setRegistration(false) }.isSuccess) {
+                        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1500)
+                        while (!unregistered && System.nanoTime() < deadline) PjsuaLib.ep.libHandleEvents(20)
+                    }
+                    // shutdown() detaches from pjsua; the Java wrapper must be freed explicitly.
+                    try { acc.shutdown() } finally { acc.delete(); account = null }
                 }
-                // shutdown() detaches from pjsua; the Java wrapper must be freed explicitly.
-                try { acc.shutdown() } finally { acc.delete(); account = null }
-            }
-            account = null
-            if (releaseTransport) PjsuaLib.closeTransport(config.transport, config.localPort)
-            setStatus(EndpointStatus(false, "stopped"))
+                if (releaseTransport) PjsuaLib.closeTransport(config.transport, config.localPort)
             } finally { done.countDown() }
         }
         done.await(timeoutMs, TimeUnit.MILLISECONDS)
@@ -112,7 +123,7 @@ class PjsipEndpoint(
 
     /** Network changed: pjsua rebinds, re-registers and re-INVITEs active calls with the new address. */
     fun refreshRegistration() {
-        if (PjsuaLib.running) PjsuaLib.handleIpChange()
+        if (!stopped && PjsuaLib.running) PjsuaLib.handleIpChange()
     }
 
     private fun createAccount() {
@@ -172,12 +183,15 @@ class PjsipEndpoint(
             leg.doHangup(HangupCause.INTERNAL_ERROR)
             return leg
         }
-        PjsuaLib.post { leg.startOutbound(target, caller) }
+        PjsuaLib.post {
+            if (stopped) leg.doHangup(HangupCause.UNAVAILABLE) else leg.startOutbound(target, caller)
+        }
         return leg
     }
 
+    @Synchronized
     private fun setStatus(s: EndpointStatus) {
-        if (s == status) return
+        if ((stopped && s != STOPPED) || s == status) return
         status = s
         statusListeners.forEach { it.onStatusChanged(this, s) }
     }
@@ -186,7 +200,7 @@ class PjsipEndpoint(
 
     private fun onRegState(prm: OnRegStateParam) {
         if (stopped) {
-            if (prm.expiration == 0L) unregistered = true
+            if (prm.code / 100 == 2 && prm.expiration == 0L) unregistered = true
             return
         }
         val code = prm.code
@@ -233,8 +247,16 @@ class PjsipEndpoint(
     }
 
     companion object {
-        /** All endpoints must be stopped before releasing the shared native library. */
-        fun stopLibrary() = PjsuaLib.stop()
+        private val STOPPED = EndpointStatus(false, "stopped")
+        // Keep blocking initialization, DNS and teardown ordered without holding up gateway-runtime.
+        private val startup = ThreadPoolExecutor(0, 1, 1, TimeUnit.SECONDS, LinkedBlockingQueue()) { task ->
+            Thread(task, "sip-startup").apply { isDaemon = true }
+        }
+
+        /** Queues native teardown after pending startup work. Stop all endpoints before calling. */
+        fun stopLibrary() { startup.execute {
+            runCatching { PjsuaLib.stop() }.onFailure { PjsuaLib.log.warn("SIP library shutdown failed", it) }
+        } }
 
         /** Passes pjsip's info-level log lines through (call/registration traces). Off by default. */
         fun setVerboseLogging(on: Boolean) {

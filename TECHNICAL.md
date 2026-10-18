@@ -27,6 +27,11 @@ dialer ownership. PBX registration failures use the SIP stack's retries; the bui
 DNS failures and retries them. Unregistration is best effort if the PBX is unreachable, so stale contacts
 may remain until expiry.
 
+PJSIP native initialization and DNS run on a serialized startup worker, leaving gateway controls
+available while they wait. Stopping an endpoint cancels pending account creation. Native library
+teardown is queued on the same worker before replacement startup; an outstanding initialization or
+DNS lookup is not interrupted, so native cleanup can finish after the gateway controls return.
+
 On Android 11, turn **Take over calls** on (or tap **Enable takeover**) to grant default-dialer call access.
 With Shizuku connected, this saves your previous dialer and changes the role directly, without the
 system role dialog. Changes wait for current calls to end and can be cancelled while waiting.
@@ -51,7 +56,7 @@ Toggling takeover again cancels the pending handoff; existing calls keep their b
 On Android 12+, Automatic returns to companion mode after restoration. Select **Default dialer** in Advanced
 to acquire the role on each switch-on. **Alongside dialer** is disabled on Android 11. If this app currently
 holds the role, restore your usual phone app before using companion mode. Both modes require Shizuku for audio.
-Switching takeover off waits for owned calls and bridge cleanup, then unregisters SIP, destroys the native
+Switching takeover off waits for owned calls and bridge cleanup, then unregisters SIP, queues teardown of the native
 pjsua2 library, cancels health/dialer polling, unregisters network monitoring, and releases this app's Shizuku
 helper after handoff cleanup. The shared Shizuku server keeps running. Switching on starts a new gateway lifetime.
 In companion mode, switching takeover off also stops the foreground service and removes its notification;
