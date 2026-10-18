@@ -115,9 +115,19 @@ class GatewayRuntime private constructor(context: Context) {
     private fun audioFormat() = if (settings.sipStack == SipStack.PJSUA2)
         PcmFormat.WIDEBAND else PcmFormat.NARROWBAND
 
+    private val _directMuteIncompatible = MutableStateFlow(settingsStore.directMuteIncompatible())
+    /** Voice-call stream mute stopped direct capture on this build; direct calls skip it. */
+    val directMuteIncompatible: StateFlow<Boolean> = _directMuteIncompatible
+
     private val audioOpener = PrivilegedAudioOpener(shizuku, { settings.audioMethod },
         { settings.muteEarpiece }, ::audioFormat,
-        onStatusChanged = { worker.execute { updateAudioStatusPolling() } })
+        onStatusChanged = { worker.execute { updateAudioStatusPolling() } },
+        directMuteBlocked = { _directMuteIncompatible.value },
+        onDirectMuteIncompatible = {
+            settingsStore.setDirectMuteIncompatible(true)
+            _directMuteIncompatible.value = true
+            AppLog.i("earpiece mute stopped direct call capture; skipping it for direct audio on this build")
+        })
     val callAudioStatus get() = audioOpener.status
 
     val cellular = CellularEndpoint(app,
@@ -790,6 +800,9 @@ class GatewayRuntime private constructor(context: Context) {
     fun setMuteEarpiece(on: Boolean) = worker.execute {
         settingsStore.save(settings.copy(muteEarpiece = on).also { _settings.value = it })
         pendingSettings = pendingSettings?.copy(muteEarpiece = on)
+        // Changing the setting is the explicit way to retest a device marked incompatible.
+        settingsStore.setDirectMuteIncompatible(false)
+        _directMuteIncompatible.value = false
         AppLog.i("earpiece mute ${if (on) "on" else "off"} (from next call)")
     }
 

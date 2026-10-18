@@ -28,6 +28,9 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     private var tap: CallAudioTap? = null
     private var lastTapStats = "no tap yet"
     private var lastBackend = ""
+    private var lastRecoveryDetail = ""
+    /** Set by the app from its per-device record; applies from the next tap. */
+    @Volatile private var directMuteBlocked = false
     private val audioManager by lazy { ShellEnv.audioManager(shellCtx) }
     private val dialerPlatform by lazy { ShellDialerPlatform(shellCtx, appUid) }
     private val dialerRoles by lazy { DialerRoles(appPackage, dialerPlatform) }
@@ -163,9 +166,12 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     override fun openCallAudio(method: Int, sampleRate: Int): ParcelFileDescriptor {
         enforceCaller()
         closeCallAudio()
-        synchronized(muteLock) { localOutputMute.beginCall() }
+        synchronized(muteLock) {
+            localOutputMute.beginCall(if (directMuteBlocked) "it previously stopped direct capture on this device" else null)
+        }
+        lastRecoveryDetail = ""
         val owner = Any()
-        val t = CallAudioTap(shellCtx, method, sampleRate) { onTapClosed(owner) }
+        val t = CallAudioTap(shellCtx, method, sampleRate, TapHooks(owner))
         // Register before starting the worker threads so a tap that closes during open cannot later
         // acquire a mute lease. setLocalOutputMuted is serialized with open/close on the service.
         synchronized(muteLock) { muteTapOwner = owner }
@@ -184,6 +190,7 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         tap?.let {
             it.close()
             lastTapStats = it.stats()
+            lastRecoveryDetail = it.recoveryDetail
         }
         tap = null
         // Also retries a restore that failed in the tap callback, or after an earlier close.
@@ -212,6 +219,8 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
                     voiceCallStreamMuted = runCatching {
                         audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)
                     }.getOrNull(),
+                    directMuteIncompatible = localOutputMute.directMuteIncompatible,
+                    recoveryDetail = tap?.recoveryDetail ?: lastRecoveryDetail,
                 ).toBundle()
             }
         }
@@ -223,6 +232,11 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         return asHelper { if (muted) muteLocal() else restoreLocal("requested") }
     }
 
+    override fun setDirectOutputMuteBlocked(blocked: Boolean) {
+        enforceCaller()
+        directMuteBlocked = blocked
+    }
+
     private inline fun <T> asHelper(block: () -> T): T {
         val token = Binder.clearCallingIdentity()
         return try { block() } finally { Binder.restoreCallingIdentity(token) }
@@ -231,10 +245,40 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     private fun muteLocal(): String = synchronized(muteLock) {
         val current = tap
         if (current == null || muteTapOwner == null) return "no tap open"
+        muteFor(current.usedMethod)
+    }
+
+    private fun muteFor(usedMethod: String): String {
         // Redirected taps keep working when mode 5 tears down the handset patches. Direct telephony
         // taps need IN_CALL to remain active, so silence only their voice-call output stream.
-        localOutputMute.mute(Build.VERSION.SDK_INT >= 33 && current.usedMethod.startsWith("redirection"))
+        return localOutputMute.mute(Build.VERSION.SDK_INT >= 33 && usedMethod.startsWith("redirection"))
             .also { Log.i(TAG, "local mute: $it") }
+    }
+
+    /** Mute coordination for in-place tap recoveries; ignored once [owner]'s tap is no longer current. */
+    private inner class TapHooks(private val owner: Any) : CallAudioTap.Hooks {
+        override fun withdrawMuteForCaptureFailure(failure: String): Boolean = asHelper {
+            synchronized(muteLock) {
+                if (muteTapOwner !== owner) return@synchronized false
+                val restored = localOutputMute.withdrawForCaptureFailure(failure) ?: return@synchronized false
+                Log.w(TAG, "local mute withdrawn after capture failure: $restored")
+                true
+            }
+        }
+
+        override fun beforeBackendSwitch() {
+            asHelper { synchronized(muteLock) { if (muteTapOwner === owner) restoreLocal("audio backend switch") } }
+        }
+
+        override fun afterBackendSwitch(usedMethod: String) {
+            asHelper {
+                synchronized(muteLock) {
+                    if (muteTapOwner === owner && localOutputMute.requested) muteFor(usedMethod)
+                }
+            }
+        }
+
+        override fun onClosed() = onTapClosed(owner)
     }
 
     private fun onTapClosed(owner: Any) = asHelper {

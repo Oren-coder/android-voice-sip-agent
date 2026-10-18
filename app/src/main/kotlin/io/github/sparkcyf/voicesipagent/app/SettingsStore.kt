@@ -1,6 +1,7 @@
 package io.github.sparkcyf.voicesipagent.app
 
 import android.content.Context
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -109,6 +110,18 @@ class SettingsStore(context: Context) {
             .apply()
     }
 
+    /**
+     * Voice-call stream mute stopped direct call capture on this build. Kept apart from
+     * [GatewaySettings]: it is an observation, keyed by the build fingerprint so OS updates retest.
+     */
+    fun directMuteIncompatible(): Boolean = prefs.getString(DIRECT_MUTE_INCOMPATIBLE, null) == Build.FINGERPRINT
+
+    fun setDirectMuteIncompatible(on: Boolean) {
+        prefs.edit().apply {
+            if (on) putString(DIRECT_MUTE_INCOMPATIBLE, Build.FINGERPRINT) else remove(DIRECT_MUTE_INCOMPATIBLE)
+        }.apply()
+    }
+
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
@@ -141,5 +154,6 @@ class SettingsStore(context: Context) {
 
     companion object {
         private const val KEY_ALIAS = "sip-password"
+        private const val DIRECT_MUTE_INCOMPATIBLE = "direct_mute_incompatible_build"
     }
 }
