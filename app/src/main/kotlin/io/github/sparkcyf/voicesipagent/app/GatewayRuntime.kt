@@ -159,6 +159,7 @@ class GatewayRuntime private constructor(context: Context) {
             if (settings.takeover != on) {
                 settingsStore.save(settings.copy(takeover = on).also { _settings.value = it })
             }
+            pendingSettings = pendingSettings?.copy(takeover = on)
         }
         override fun cancelDialerChange() = clearDialerChange()
         override fun prepareDialerChange(acquire: Boolean) = prepareDialerChangeRequest(acquire)
@@ -711,15 +712,25 @@ class GatewayRuntime private constructor(context: Context) {
 
     // ------------------------------------------------------------ external controls
 
-    fun applySettings(new: GatewaySettings) = worker.execute {
+    /** Evaluate edits on the worker against the latest queued settings, never an older UI snapshot. */
+    fun applySettings(update: (GatewaySettings) -> GatewaySettings) = worker.execute {
+        val new = update(pendingSettings ?: settings)
+        applySettingsNow(new)
+    }
+
+    private fun applySettingsNow(new: GatewaySettings) {
         require(new.audioMethod in 0..2 && new.callAccess in 0..2) { "unknown platform setting" }
         if (hasActiveWork()) {
             pendingSettings = new
             _health.update { it.copy(settingsPending = true) }
             AppLog.i("settings will apply after current calls end")
-            return@execute
+            return
         }
         val old = settings
+        // A new edit can arrive after Telecom reports idle but before its deferred-change task.
+        // This commit already includes the queued edits; do not replay their older snapshot later.
+        pendingSettings = null
+        _health.update { it.copy(settingsPending = setupPending || restartPending || loopbackPending != null) }
         settingsStore.save(new)
         _settings.value = new
         AppLog.i("settings saved ($new)")
@@ -736,6 +747,7 @@ class GatewayRuntime private constructor(context: Context) {
     /** pjsip info-level logging; takes effect immediately, persisted for the next start. */
     fun setSipDebugLog(on: Boolean) = worker.execute {
         settingsStore.save(settings.copy(sipDebugLog = on).also { _settings.value = it })
+        pendingSettings = pendingSettings?.copy(sipDebugLog = on)
         PjsipEndpoint.setVerboseLogging(on)
         AppLog.i("SIP debug log ${if (on) "on" else "off"}")
     }
@@ -743,6 +755,7 @@ class GatewayRuntime private constructor(context: Context) {
     /** Read at each call's audio setup, so no restart is needed. */
     fun setMuteEarpiece(on: Boolean) = worker.execute {
         settingsStore.save(settings.copy(muteEarpiece = on).also { _settings.value = it })
+        pendingSettings = pendingSettings?.copy(muteEarpiece = on)
         AppLog.i("earpiece mute ${if (on) "on" else "off"} (from next call)")
     }
 
@@ -798,7 +811,7 @@ class GatewayRuntime private constructor(context: Context) {
         val loopback = loopbackPending
         loopbackPending = null
         _health.update { it.copy(settingsPending = false) }
-        if (queued != null) applySettings(queued.copy(takeover = settings.takeover))
+        if (queued != null) applySettingsNow(queued.copy(takeover = settings.takeover))
         if (loopback != null) setLoopbackTest(loopback)
         if (restart) restartSip()
         configureCallAccess()

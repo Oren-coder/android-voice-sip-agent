@@ -14,6 +14,7 @@ import io.github.sparkcyf.voicesipagent.gateway.CallBridge
 import io.github.sparkcyf.voicesipagent.pjsua2.PjsipConfig
 import io.github.sparkcyf.voicesipagent.pjsua2.PjsipEndpoint
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
+import io.github.sparkcyf.voicesipagent.privileged.AudioMethod
 import io.github.sparkcyf.voicesipagent.privileged.DialerRoleResult
 import io.github.sparkcyf.voicesipagent.privileged.IPrivilegedService
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
@@ -83,7 +84,7 @@ class GatewayRuntimeLifecycleTest {
         Fixture(enabled = true, rejectLaunch = true).use { f ->
             f.runtime.restartSip()
             f.runtime.setLoopbackTest(true)
-            f.runtime.applySettings(f.runtime.settings.copy(inboundTarget = "changed"))
+            f.runtime.applySettings { it.copy(inboundTarget = "changed") }
             f.runtime.runSetup()
             f.drain()
             verify(f.context, atLeastOnce()).startForegroundService(any(Intent::class.java))
@@ -197,6 +198,93 @@ class GatewayRuntimeLifecycleTest {
         verify(f.bridges.constructed().single()).stop()
         assertFalse(f.runtime.health.value.takeover)
         assertFalse(f.runtime.health.value.takeoverOffPending)
+    }
+
+    @Test fun settingsQueuedDuringCallAccumulateAndApplyTogether(): Unit = Fixture(enabled = true).use { f ->
+        f.connect()
+        `when`(f.runtime.cellular.hasCalls).thenReturn(true)
+        f.runtime.applySettings { it.copy(audioMethod = AudioMethod.LEGACY) }
+        f.runtime.applySettings { it.copy(callAccess = CallAccess.AUTO) }
+        f.runtime.applySettings { it.copy(inboundTarget = "queued-target") }
+        f.drain()
+        assertTrue(f.runtime.health.value.settingsPending)
+        assertEquals(AudioMethod.AUTO, f.runtime.settings.audioMethod)
+        assertEquals(CallAccess.DIALER, f.runtime.settings.callAccess)
+        assertEquals("", f.runtime.settings.inboundTarget)
+        assertEquals(AudioMethod.LEGACY, f.runtime.pendingSettingsFlow.value?.audioMethod)
+        assertEquals(CallAccess.AUTO, f.runtime.pendingSettingsFlow.value?.callAccess)
+        assertEquals("queued-target", f.runtime.pendingSettingsFlow.value?.inboundTarget)
+        verify(f.endpoints.constructed().single(), never()).stop(anyLong(), anyBoolean())
+
+        `when`(f.runtime.cellular.hasCalls).thenReturn(false)
+        f.callsChanged(CallSnapshot())
+        f.drain()
+        assertFalse(f.runtime.health.value.settingsPending)
+        assertNull(f.runtime.pendingSettingsFlow.value)
+        assertEquals(AudioMethod.LEGACY, f.runtime.settings.audioMethod)
+        assertEquals(CallAccess.AUTO, f.runtime.settings.callAccess)
+        assertEquals("queued-target", f.runtime.settings.inboundTarget)
+    }
+
+    @Test fun editAfterCallEndsConsumesOlderQueueBeforeCallCallback(): Unit = Fixture(enabled = true).use { f ->
+        f.connect()
+        `when`(f.runtime.cellular.hasCalls).thenReturn(true)
+        f.runtime.applySettings { it.copy(audioMethod = AudioMethod.LEGACY) }
+        f.drain()
+
+        // The UI can submit another edit before the queued onCallsChanged callback is processed.
+        `when`(f.runtime.cellular.hasCalls).thenReturn(false)
+        f.runtime.applySettings { it.copy(callAccess = CallAccess.AUTO) }
+        f.drain()
+        assertNull(f.runtime.pendingSettingsFlow.value)
+        assertEquals(AudioMethod.LEGACY, f.runtime.settings.audioMethod)
+        assertEquals(CallAccess.AUTO, f.runtime.settings.callAccess)
+        f.callsChanged(CallSnapshot())
+        f.drain()
+        assertFalse(f.runtime.health.value.settingsPending)
+        assertEquals(AudioMethod.LEGACY, f.runtime.settings.audioMethod)
+        assertEquals(CallAccess.AUTO, f.runtime.settings.callAccess)
+    }
+
+    @Test fun laterImmediatePreferencesAreNotRevertedByQueuedSettings(): Unit = Fixture(enabled = true).use { f ->
+        f.connect()
+        `when`(f.runtime.cellular.hasCalls).thenReturn(true)
+        f.runtime.applySettings { it.copy(inboundTarget = "queued-target") }
+        f.runtime.setMuteEarpiece(false)
+        f.runtime.setSipDebugLog(true)
+        f.runtime.setKeepDefaultDialer(true)
+        f.drain()
+        assertFalse(f.runtime.settings.muteEarpiece)
+        assertTrue(f.runtime.settings.sipDebugLog)
+        assertTrue(f.runtime.settings.keepDefaultDialer)
+        assertEquals("", f.runtime.settings.inboundTarget)
+
+        `when`(f.runtime.cellular.hasCalls).thenReturn(false)
+        f.callsChanged(CallSnapshot())
+        f.drain()
+        assertEquals("queued-target", f.runtime.settings.inboundTarget)
+        assertFalse(f.runtime.settings.muteEarpiece)
+        assertTrue(f.runtime.settings.sipDebugLog)
+        assertTrue(f.runtime.settings.keepDefaultDialer)
+    }
+
+    @Test fun queuedSettingsDoNotUndoSwitchOffAtCallEnd(): Unit = Fixture(enabled = true, holder = "gateway").use { f ->
+        f.connect()
+        f.runtime.setKeepDefaultDialer(true)
+        f.drain()
+        `when`(f.runtime.cellular.hasCalls).thenReturn(true)
+        f.runtime.applySettings { it.copy(inboundTarget = "queued-target") }
+        f.runtime.setTakeover(false)
+        f.drain()
+        assertTrue(f.runtime.health.value.takeoverOffPending)
+
+        `when`(f.runtime.cellular.hasCalls).thenReturn(false)
+        f.callsChanged(CallSnapshot())
+        f.drain()
+        assertFalse(f.runtime.settings.takeover)
+        assertFalse(f.runtime.health.value.takeover)
+        assertEquals("queued-target", f.runtime.settings.inboundTarget)
+        assertEquals(1, f.endpoints.constructed().size)
     }
 
     private class Fixture(enabled: Boolean = false, var holder: String? = "phone", rejectLaunch: Boolean = false) : AutoCloseable {
