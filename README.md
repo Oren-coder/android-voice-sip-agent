@@ -31,6 +31,15 @@ Tested on:
 |---|---|---|
 | Google Pixel 11 Pro | 17 | Main development device |
 | Motorola | 16 | Works |
+| POCO F6 (HyperOS 2) | 15 | Two-way audio with Direct telephony and local output mute off¹ |
+| vivo V30 Lite | 15 | Same¹ |
+| POCO F3 (MIUI 14) | 13 | Same¹ |
+| Samsung Galaxy A15 5G (One UI) | 16 | Same¹ |
+| Redmi Note 13 Pro (HyperOS 2, MT6789) | 15 | Same¹ |
+| Infinix X678B | 14 | Registers; call audio not tested¹ |
+
+¹ Community report ([#1](../../issues/1)). Other audio settings did not give two-way audio on these devices; see
+[Troubleshooting](#troubleshooting).
 
 Verified: inbound and outbound calls, two-way audio, DTMF (RFC 4733), Wi-Fi reconnect (also mid-call), overnight
 Doze standby, long calls without clock drift, handset muting, LAN calls over UDP and public calls over TLS + SRTP
@@ -43,7 +52,8 @@ The default pjsua2 SIP stack supports Opus with G.711 fallback. See [audio forma
 for codec settings and further validation gaps.
 
 Limitations: one call at a time. The APK packages arm64-v8a and targets Android 11+ (minSdk 30).
-Android 11 compatibility remain unverified. Hidden APIs and modem routing may differ across devices.
+Android 11 remains untested. Hidden APIs and modem routing differ across vendors, so other devices
+may need different audio settings or may not work at all.
 Default-dialer mode provides gateway status and recovery, with a switch-dialer action for manual calling.
 Emergency numbers are always refused and are never dialed through the gateway.
 
@@ -129,17 +139,37 @@ R=io.github.sparkcyf.voicesipagent/io.github.sparkcyf.voicesipagent.app.AdbContr
 adb shell am broadcast -n $R --es op provision --es server sip.example.org --ei port 5061 \
   --es transport tls --es srtp optional --es domain sip.example.org \
   --es user android-gw --es password "'<secret>'" --es target android-gw   # only overwrites the given fields
-adb shell am broadcast -n $R --es op status            # printed to logcat
+adb shell am broadcast -n $R --es op status            # one-line summary; full report in logcat
 adb shell am broadcast -n $R --es op takeover --ez on false
 adb shell am broadcast -n $R --es op earpiece-mute --ez on true
 adb shell am broadcast -n $R --es op sip-stack --es stack pjsua2
 adb shell am broadcast -n $R --es op loopback --ez on true   # echo incoming cellular calls (test mode)
 adb shell am broadcast -n $R --es op sip-debug --ez on true  # verbose pjsip logging
 adb shell am broadcast -n $R --es op provision --ez hold_sip false   # stay registered while not ready
+adb shell am broadcast -n $R --es op provision --ei audio_method 2   # 0 Automatic, 1 Call redirection, 2 Direct telephony
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 
+Each command reports its outcome, e.g. `Broadcast completed: result=1, data="ok: ready=true (Gateway ready) …"`.
+`result=1` means applied (settings replies show the effective values, never the password), `2` a bad op or
+argument, and `3` that the change is still queued after 5 s. `result=0` with no data means the broadcast never
+reached the app: check the component name.
+
 Phone numbers are logged with only their last two digits; call audio is never logged or stored.
+
+## Troubleshooting
+
+- **The far end cannot hear you, or you hear silence:** set **Cellular audio** to *Direct telephony* and turn
+  **Mute call audio on this phone** off (`--ei audio_method 2` and `earpiece-mute --ez on false` over adb). This was the
+  only combination that gave two-way audio on the community-tested devices above.
+- **Shizuku 13.6.0 on MediaTek / Transsion (e.g. Infinix) phones:** the app's privileged service never
+  starts (`NullPointerException` in `LoadedApk.makeApplicationInner`;
+  [RikkaApps/Shizuku#2048](https://github.com/RikkaApps/Shizuku/issues/2048),
+  [#1198](https://github.com/RikkaApps/Shizuku/issues/1198)). Install Shizuku 13.5.4 instead.
+- **Vendor setup:** Xiaomi, POCO and Redmi need a signed-in Mi account before USB installation and USB debugging
+  (security settings) can be enabled, and HyperOS may refuse `pm grant`. Infinix and Redmi may block
+  `adb install`; copy the APK to the phone and install it from the file manager. On Samsung, turn off
+  **Auto Blocker**. Turn off automatic system updates: an OS update can break the hidden APIs the gateway uses.
 
 ## Call routing
 

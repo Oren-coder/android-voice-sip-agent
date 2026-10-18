@@ -29,6 +29,14 @@
 |---|---|---|
 | Google Pixel 11 Pro | 17 | 主力开发机 |
 | Motorola | 16 | 正常 |
+| POCO F6（HyperOS 2） | 15 | Direct telephony + 关闭本机通话输出静音时双向语音正常¹ |
+| vivo V30 Lite | 15 | 同上¹ |
+| POCO F3（MIUI 14） | 13 | 同上¹ |
+| Samsung Galaxy A15 5G（One UI） | 16 | 同上¹ |
+| Redmi Note 13 Pro（HyperOS 2，MT6789） | 15 | 同上¹ |
+| Infinix X678B | 14 | 可注册，通话音频未测试¹ |
+
+¹ 社区反馈（[#1](../../issues/1)）。在这些设备上，其他音频设置组合都无法双向通话，见[故障排查](#故障排查)。
 
 已验证：来电与去电、双向语音、DTMF（RFC 4733）、Wi-Fi 断线重连（含通话中）、Doze 一整晚待机、长通话无时钟漂移、
 本机听筒静音；局域网 UDP 通话，以及经 Flexisip 代理的公网 TLS + SRTP 通话。
@@ -39,7 +47,7 @@
 编解码设置和其他验证事项见英文[音频格式与路由说明](TECHNICAL.md#audio-formats-and-routing)。
 
 限制：同一时间只有一路通话；APK 包含 arm64-v8a；最低为 Android 11（minSdk 30）。
-Android 11 的兼容性尚未经过真机验证；其他机型的隐藏 API 和音频路由可能不同。
+Android 11 尚未测试。各厂商的隐藏 API 和音频路由不同，其他机型可能需要不同的音频设置，也可能完全无法使用。
 默认拨号器模式提供网关状态和恢复界面，可通过切换拨号器恢复手动通话。紧急号码一律拒绝，绝不会经网关拨出。
 
 ## 安装
@@ -118,17 +126,35 @@ R=io.github.sparkcyf.voicesipagent/io.github.sparkcyf.voicesipagent.app.AdbContr
 adb shell am broadcast -n $R --es op provision --es server sip.example.org --ei port 5061 \
   --es transport tls --es srtp optional --es domain sip.example.org \
   --es user android-gw --es password "'<secret>'" --es target android-gw   # 只覆盖给出的字段
-adb shell am broadcast -n $R --es op status            # 输出到 logcat
+adb shell am broadcast -n $R --es op status            # 返回一行摘要；完整报告在 logcat
 adb shell am broadcast -n $R --es op takeover --ez on false
 adb shell am broadcast -n $R --es op earpiece-mute --ez on true
 adb shell am broadcast -n $R --es op sip-stack --es stack pjsua2
 adb shell am broadcast -n $R --es op loopback --ez on true   # 回声测试：蜂窝来电直接回声
 adb shell am broadcast -n $R --es op sip-debug --ez on true  # pjsip 详细日志
 adb shell am broadcast -n $R --es op provision --ez hold_sip false   # 未就绪时也保持注册
+adb shell am broadcast -n $R --es op provision --ei audio_method 2   # 0 Automatic，1 Call redirection，2 Direct telephony
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 
+每条命令都会返回结果，例如 `Broadcast completed: result=1, data="ok: ready=true (Gateway ready) …"`。
+`result=1` 表示已生效（设置类命令返回生效后的值，不含密码），`2` 表示操作或参数有误，`3` 表示 5 秒后仍在排队。
+`result=0` 且没有 data 说明广播根本没送达 App，请检查组件名。
+
 日志中的电话号码只保留后两位；通话音频不会写入日志，也不会落盘。
+
+## 故障排查
+
+- **对方听不到你，或者你只听到静音**：把 **Cellular audio** 设为 *Direct telephony*，并关闭
+  **Mute call audio on this phone**（adb 下为 `--ei audio_method 2` 和 `earpiece-mute --ez on false`）。
+  在上表的社区测试设备上，只有这个组合能双向通话。
+- **MediaTek / 传音（如 Infinix）手机上的 Shizuku 13.6.0**：App 的特权服务始终无法启动
+  （`LoadedApk.makeApplicationInner` 中的 `NullPointerException`；
+  [RikkaApps/Shizuku#2048](https://github.com/RikkaApps/Shizuku/issues/2048)、
+  [#1198](https://github.com/RikkaApps/Shizuku/issues/1198)）。请改装 Shizuku 13.5.4。
+- **厂商设置**：小米、POCO、Redmi 需要登录小米账号才能开启 USB 安装和 USB 调试（安全设置），HyperOS 还可能拒绝
+  `pm grant`。Infinix 和 Redmi 可能禁止 `adb install`，可把 APK 拷到手机上用文件管理器安装。三星需关闭
+  **Auto Blocker**。请关闭系统自动更新：系统更新可能破坏网关依赖的隐藏 API。
 
 ## 呼叫路由
 
