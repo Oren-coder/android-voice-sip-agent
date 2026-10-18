@@ -28,11 +28,10 @@ class AdbControlReceiver : BroadcastReceiver() {
             "sip-stack" -> {
                 val stack = SipStack.of(intent.getStringExtra("stack"))
                 if (stack == null) AppLog.w("adb control: sip-stack needs --es stack builtin|pjsua2")
-                else rt.applySettings(rt.settings.copy(sipStack = stack))
+                else rt.applySettings { it.copy(sipStack = stack) }
             }
             "provision" -> {
-                val cur = rt.settings
-                rt.applySettings(
+                rt.applySettings { cur ->
                     cur.copy(
                         server = intent.getStringExtra("server") ?: cur.server,
                         port = intent.getIntExtra("port", cur.port),
@@ -45,8 +44,8 @@ class AdbControlReceiver : BroadcastReceiver() {
                         allowedPrefixes = intent.getStringExtra("prefixes") ?: cur.allowedPrefixes,
                         audioMethod = intent.getIntExtra("audio_method", cur.audioMethod),
                         callAccess = intent.getIntExtra("call_access", cur.callAccess),
-                    ),
-                )
+                    )
+                }
             }
             else -> AppLog.w("adb control: unknown op '$op'")
         }

@@ -34,10 +34,10 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -48,6 +48,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModelProvider
 import io.github.sparkcyf.voicesipagent.pjsua2.SipTransport
 import io.github.sparkcyf.voicesipagent.pjsua2.SrtpPolicy
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
@@ -59,11 +60,13 @@ class MainActivity : DialerRoleActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val runtime = GatewayRuntime.get(this)
+        val editor = ViewModelProvider(this)[SipSettingsDraft::class.java]
+        editor.syncSaved(runtime.settings, runtime.pendingSettingsFlow.value)
         GatewayService.start(this)
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 val message by roleMessage.collectAsState()
-                Scaffold { pad -> Screen(runtime, Modifier.padding(pad), ::requestDialer, ::switchDialer,
+                Scaffold { pad -> Screen(runtime, editor, Modifier.padding(pad), ::requestDialer, ::switchDialer,
                     ::chooseDialerInSettings, ::cancelDialerChange, ::setTakeoverFromUi, message) }
             }
         }
@@ -71,7 +74,7 @@ class MainActivity : DialerRoleActivity() {
 }
 
 @Composable
-private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit,
+private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit,
     chooseDialer: () -> Unit, cancelDialer: () -> Unit, setTakeover: (Boolean) -> Unit, roleMessage: String) {
     val h by rt.health.collectAsState()
     val pendingSettings by rt.pendingSettingsFlow.collectAsState()
@@ -174,7 +177,7 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                 Button(onClick = { rt.setLoopbackTest(false) }) { Text("Disable echo test") }
             }
         }
-        SettingsSection(rt)
+        SettingsSection(rt, editor)
         var advanced by rememberSaveable { mutableStateOf(false) }
         OutlinedButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Hide advanced settings" else "Advanced settings") }
         if (advanced) {
@@ -183,7 +186,7 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                 Choice("Call access", listOf(CallAccess.AUTO, CallAccess.COMPANION, CallAccess.DIALER), preferredCallAccess,
                     { when (it) { CallAccess.AUTO -> "Automatic"; CallAccess.COMPANION -> "Alongside dialer"; else -> "Default dialer" } },
                     enabled = { it != CallAccess.COMPANION || Build.VERSION.SDK_INT >= 31 }) {
-                    rt.applySettings(cur.copy(callAccess = it))
+                    rt.applySettings { current -> current.copy(callAccess = it) }
                 }
                 val callAccessHint = when (preferredCallAccess) {
                     CallAccess.AUTO -> if (Build.VERSION.SDK_INT < 31)
@@ -216,7 +219,7 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                 Choice("Cellular audio", listOf(AudioMethod.AUTO, AudioMethod.LEGACY, AudioMethod.OFFICIAL), preferredAudioMethod,
                     { when (it) { AudioMethod.AUTO -> "Automatic"; AudioMethod.LEGACY -> "Direct telephony"; else -> "Call redirection" } },
                     enabled = { it != AudioMethod.OFFICIAL || Build.VERSION.SDK_INT >= 33 }) {
-                    rt.applySettings(cur.copy(audioMethod = it))
+                    rt.applySettings { current -> current.copy(audioMethod = it) }
                 }
                 Text(when (preferredAudioMethod) {
                     AudioMethod.AUTO -> "Tries call redirection first, then directly configure Telephony device if needed."
@@ -244,29 +247,15 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
 }
 
 @Composable
-private fun SettingsSection(rt: GatewayRuntime) {
-    // Re-seed the form whenever settings change elsewhere (e.g. adb provisioning).
+private fun SettingsSection(rt: GatewayRuntime, editor: SipSettingsDraft) = with(editor) {
     val cur by rt.settingsFlow.collectAsState()
     val pending by rt.pendingSettingsFlow.collectAsState()
     val health by rt.health.collectAsState()
-    var server by remember(cur) { mutableStateOf(cur.server) }
-    var port by remember(cur) { mutableStateOf(cur.port.toString()) }
-    var user by remember(cur) { mutableStateOf(cur.username) }
-    var password by remember(cur) { mutableStateOf(cur.password) }
-    var target by remember(cur) { mutableStateOf(cur.inboundTarget) }
-    var prefixes by remember(cur) { mutableStateOf(cur.allowedPrefixes) }
-    var domain by remember(cur) { mutableStateOf(cur.domain) }
-    var stack by remember(cur) { mutableStateOf(cur.sipStack) }
-    var transport by remember(cur) { mutableStateOf(SipTransport.of(cur.sipTransport) ?: SipTransport.UDP) }
-    var srtp by remember(cur) { mutableStateOf(SrtpPolicy.of(cur.srtp) ?: SrtpPolicy.OPTIONAL) }
+    LaunchedEffect(cur, pending) { syncSaved(cur, pending) }
     val builtin = stack == SipStack.BUILTIN
-    val draft = cur.copy(
-        server = server, port = port.toIntOrNull() ?: transport.defaultPort, username = user, password = password,
-        inboundTarget = target, allowedPrefixes = prefixes, domain = domain,
-        sipStack = stack, sipTransport = transport.id, srtp = srtp.id,
-    )
-    val unsaved = !draft.hasSameSipSettings(pending ?: cur) || port.toIntOrNull() == null
+    val unsaved = hasUnsavedChanges(cur, pending)
     val sipPending = pending?.hasSameSipSettings(cur) == false
+    val portValidationError = portError
     Section("Settings") {
         Choice("SIP stack", SipStack.entries, stack, { it.id }) {
             stack = it
@@ -285,7 +274,7 @@ private fun SettingsSection(rt: GatewayRuntime) {
             srtp = it
         }
         Field("PBX host", server) { server = it }
-        Field("PBX port", port, KeyboardType.Number) { port = it }
+        Field("PBX port", port, KeyboardType.Number, error = portValidationError) { port = it }
         Field("SIP domain (empty = PBX host)", domain) { domain = it }
         Field("Extension / user", user) { user = it }
         OutlinedTextField(
@@ -297,7 +286,7 @@ private fun SettingsSection(rt: GatewayRuntime) {
         if (unsaved) Text("Unsaved changes", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary)
         if (sipPending) Text("Changes pending until calls end", style = MaterialTheme.typography.bodySmall)
-        Button(onClick = { rt.applySettings(draft) }) { Text("Save & apply") }
+        Button(onClick = { rt.applySettings(settingsUpdate()) }, enabled = portValidationError == null) { Text("Save & apply") }
         if (health.calls.count > 0 || health.session != null) {
             if (!sipPending) Text("Saved changes apply after the current call ends.", style = MaterialTheme.typography.bodySmall)
         } else if (!cur.takeover) {
@@ -308,12 +297,6 @@ private fun SettingsSection(rt: GatewayRuntime) {
         }
     }
 }
-
-/** Gateway preferences do not count as edits to the SIP form. */
-private fun GatewaySettings.hasSameSipSettings(other: GatewaySettings): Boolean =
-    server == other.server && port == other.port && username == other.username && password == other.password &&
-        inboundTarget == other.inboundTarget && allowedPrefixes == other.allowedPrefixes && domain == other.domain &&
-        sipStack == other.sipStack && sipTransport == other.sipTransport && srtp == other.srtp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -355,10 +338,13 @@ private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit,
 }
 
 @Composable
-private fun Field(label: String, value: String, type: KeyboardType = KeyboardType.Text, onChange: (String) -> Unit) {
+private fun Field(label: String, value: String, type: KeyboardType = KeyboardType.Text,
+    error: String? = null, onChange: (String) -> Unit) {
     OutlinedTextField(
         value = value, onValueChange = onChange, label = { Text(label) }, singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = type), modifier = Modifier.fillMaxWidth(),
+        isError = error != null,
+        supportingText = if (error != null) { { Text(error) } } else null,
     )
 }
 
