@@ -287,7 +287,41 @@ class GatewayRuntimeLifecycleTest {
         assertEquals(1, f.endpoints.constructed().size)
     }
 
-    private class Fixture(enabled: Boolean = false, var holder: String? = "phone", rejectLaunch: Boolean = false) : AutoCloseable {
+    @Test fun sipStaysUnregisteredUntilCellularReady(): Unit = Fixture(enabled = true, holdSip = true).use { f ->
+        f.connect()
+        // The fixture's helper never reports call access or audio, so the cellular side is not ready.
+        assertTrue(f.endpoints.constructed().isEmpty())
+        assertTrue(f.bridges.constructed().isEmpty())
+        val sip = f.runtime.health.value.sip
+        assertFalse(sip.ready)
+        assertTrue(sip.detail, sip.detail.startsWith("held unregistered: "))
+        assertFalse(f.runtime.health.value.cellularReady)
+    }
+
+    @Test fun disablingHoldRegistersOnlyAfterCallsEnd(): Unit = Fixture(enabled = true, holdSip = true).use { f ->
+        f.connect()
+        `when`(f.runtime.cellular.hasCalls).thenReturn(true)
+        f.runtime.setHoldSipWhenNotReady(false)
+        f.drain()
+        assertFalse(f.runtime.settings.holdSipWhenNotReady)
+        assertTrue(f.endpoints.constructed().isEmpty())
+
+        `when`(f.runtime.cellular.hasCalls).thenReturn(false)
+        f.callsChanged(CallSnapshot())
+        f.drain()
+        verify(f.endpoints.constructed().single()).start()
+        assertEquals(1, f.bridges.constructed().size)
+
+        // Enabling it again while still not ready unregisters at once: there was no ready period.
+        f.runtime.setHoldSipWhenNotReady(true)
+        f.drain()
+        verify(f.endpoints.constructed().single()).stop(anyLong(), eq(false))
+        assertEquals(1, f.endpoints.constructed().size)
+        assertTrue(f.runtime.health.value.sip.detail.startsWith("held unregistered: "))
+    }
+
+    private class Fixture(enabled: Boolean = false, var holder: String? = "phone", rejectLaunch: Boolean = false,
+        holdSip: Boolean = false) : AutoCloseable {
         private val scopes = mutableListOf<AutoCloseable>()
         private val workerScopes = mutableListOf<AutoCloseable>()
         lateinit var connector: ShizukuConnector
@@ -332,7 +366,7 @@ class GatewayRuntimeLifecycleTest {
             `when`(helper.setupCallAccess(anyString(), anyBoolean(), anyInt())).thenReturn(mock(Bundle::class.java))
             scopes += mockConstruction(SettingsStore::class.java) { store, _ ->
                 `when`(store.load()).thenReturn(GatewaySettings(takeover = enabled, callAccess = CallAccess.DIALER,
-                    server = "pbx.invalid", username = "test", password = "test"))
+                    server = "pbx.invalid", username = "test", password = "test", holdSipWhenNotReady = holdSip))
             }
             scopes += mockConstruction(DialerHandoffStore::class.java) { store, _ ->
                 `when`(store.save(any(PreviousDialer::class.java) ?: PreviousDialer(0, ""))).thenReturn(true)

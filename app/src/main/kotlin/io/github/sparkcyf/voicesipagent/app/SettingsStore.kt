@@ -28,6 +28,8 @@ data class GatewaySettings(
     val srtp: String = "optional",
     /** pjsip info-level logging (development); errors/warnings are always logged. */
     val sipDebugLog: Boolean = false,
+    /** Keep the SIP account unregistered while the cellular side is not ready, so the PBX can fail over. */
+    val holdSipWhenNotReady: Boolean = true,
     val username: String = "",
     val password: String = "",
     val domain: String = "",
@@ -45,7 +47,7 @@ data class GatewaySettings(
     val sipConfigured: Boolean get() = server.isNotBlank() && username.isNotBlank() && password.isNotEmpty()
 
     override fun toString() =
-        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece stack=$sipStack server=$server:$port/$sipTransport srtp=$srtp user=$username target=$inboundTarget)"
+        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece stack=$sipStack server=$server:$port/$sipTransport srtp=$srtp holdSip=$holdSipWhenNotReady user=$username target=$inboundTarget)"
 }
 
 enum class SipStack(val id: String) {
@@ -74,6 +76,7 @@ class SettingsStore(context: Context) {
         sipTransport = prefs.getString("sip_transport", "udp")!!,
         srtp = prefs.getString("srtp", "optional")!!,
         sipDebugLog = prefs.getBoolean("sip_debug_log", false),
+        holdSipWhenNotReady = prefs.getBoolean("hold_sip_when_not_ready", true),
         username = prefs.getString("username", "")!!,
         password = prefs.getString("password_sealed", null)?.let(::unseal).orEmpty(),
         domain = prefs.getString("domain", "")!!,
@@ -96,6 +99,7 @@ class SettingsStore(context: Context) {
             .putString("sip_transport", s.sipTransport.trim().lowercase())
             .putString("srtp", s.srtp.trim().lowercase())
             .putBoolean("sip_debug_log", s.sipDebugLog)
+            .putBoolean("hold_sip_when_not_ready", s.holdSipWhenNotReady)
             .putString("username", s.username.trim())
             .putString("password_sealed", seal(s.password))
             .putString("domain", s.domain.trim())

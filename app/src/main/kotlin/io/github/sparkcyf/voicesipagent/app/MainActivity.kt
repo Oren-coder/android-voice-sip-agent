@@ -326,6 +326,11 @@ private fun SettingsSection(rt: GatewayRuntime, editor: SipSettingsDraft) = with
         } else if (!cur.takeover) {
             Text("Saved SIP settings are used when takeover is next enabled.", style = MaterialTheme.typography.bodySmall)
         }
+        Toggle("Unregister while the phone cannot take calls", cur.holdSipWhenNotReady,
+            { rt.setHoldSipWhenNotReady(it) }) {
+            "Lets the PBX see this trunk as unavailable and fail over, e.g. when Shizuku stops after a reboot. " +
+                "Waits ${GatewayRuntime.SIP_HOLD_GRACE_MS / 1000} s after a problem appears and never during calls; registers again as soon as the phone is ready."
+        }
         Toggle("pjsip debug log", cur.sipDebugLog, { rt.setSipDebugLog(it) }) {
             "Info-level logs with masked numbers"
         }
