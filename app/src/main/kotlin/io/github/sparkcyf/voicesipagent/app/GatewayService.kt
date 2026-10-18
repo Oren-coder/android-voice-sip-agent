@@ -14,6 +14,7 @@ import android.os.IBinder
 import android.os.Build
 import android.telecom.TelecomManager
 import androidx.core.content.ContextCompat
+import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -105,16 +106,6 @@ class GatewayService : Service() {
         super.onDestroy()
     }
 
-    private fun summary(h: HealthState): String = when {
-        h.session != null -> "In call · ${h.session}"
-        !h.takeover && h.holdsDialer -> "Takeover off. Still your default phone app; change it in Settings."
-        !h.takeover -> "Call takeover off"
-        h.loopbackTest -> "Loopback test mode"
-        !h.privilegedReady -> "Setup needed · Shizuku ${h.shizuku.name.lowercase()}"
-        !h.sip.ready -> "SIP: ${h.sip.detail}"
-        else -> "Ready · ${h.sip.detail}"
-    }
-
     private fun build(text: String): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java)
@@ -139,6 +130,19 @@ class GatewayService : Service() {
             val runtime = GatewayRuntime.get(context)
             runtime.start()
             sync(context, runtime.health.value)
+        }
+
+        internal fun summary(h: HealthState): String = when {
+            h.session != null -> "In call · ${h.session}"
+            !h.takeover && h.holdsDialer -> "Takeover off. Still your default phone app; change it in Settings."
+            !h.takeover -> "Call takeover off"
+            h.loopbackTest -> "Loopback test mode"
+            // Shizuku pushes its binder to client apps on uid/activity transitions. A restarted
+            // server may skip a running app, so opening the activity is the reconnect path.
+            h.shizuku == ShizukuConnector.State.SHIZUKU_NOT_RUNNING -> "Shizuku is not running. Start Shizuku, then tap here to reconnect."
+            !h.privilegedReady -> "Setup needed · Shizuku ${h.shizuku.name.lowercase()}"
+            !h.sip.ready -> "SIP: ${h.sip.detail}"
+            else -> "Ready · ${h.sip.detail}"
         }
 
         /** Used for both explicit launches and runtime switch/role changes. */

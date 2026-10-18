@@ -255,6 +255,13 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
 - The companion override is lost on reboot or a Telecom restart; setup attempts to restore it where applicable.
   Losing it alone does not trigger periodic setup or block API 31+ non-UI access. After a reboot the phone is
   in BFU and non-root Shizuku must be restarted by hand; start-on-boot is a non-goal.
+- **Shizuku binder delivery after a server restart**: the server pushes its binder to client apps from a
+  startup scan of installed packages and from uid/process observers (uid active/idle/uncached, process gaining
+  foreground activities). On the Pixel 11 Pro (Android 17, Shizuku 13.6.0) the startup scan reaches only the
+  manager, and a running foreground-service app makes no uid transition, so `ShizukuConnector` never receives
+  the binder. Bringing `MainActivity` to the foreground (same pid) triggers delivery immediately. The manager's
+  provider requires INTERACT_ACROSS_USERS_FULL, so the app cannot pull the binder itself. Readiness and the
+  notification therefore tell the user to open the app; there is deliberately no periodic self-restart.
 
 ## PBX integration
 
