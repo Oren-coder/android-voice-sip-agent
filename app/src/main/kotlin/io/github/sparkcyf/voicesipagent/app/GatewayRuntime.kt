@@ -966,6 +966,46 @@ class GatewayRuntime private constructor(context: Context) {
             (_health.value.effectiveCallAccess == CallAccess.COMPANION && !_health.value.callAccessReady)) runSetup()
     }
 
+    /**
+     * Runs [block] on the runtime thread after every task queued so far, and after the tasks those
+     * queue in turn (one level), so a reply reflects the outcome of a just-submitted control.
+     */
+    internal fun afterQueued(block: () -> Unit) = worker.execute { worker.execute(block) }
+
+    /** One-line summary for adb replies; mirrors [statusReport] without per-call detail. */
+    fun statusLine(): String {
+        val h = _health.value
+        val audio = callAudioStatus.value
+        return "ready=${h.cellularReady} (${h.readinessDetail}) takeover=${onOff(h.takeover)}" +
+            (if (h.takeoverOffPending || h.takeoverOnPending) " pending" else "") +
+            " sip=${if (h.sip.ready) "ready" else "down"} (${h.sip.detail}) stack=${settings.sipStack.id}" +
+            (sipHeld?.let { " sip_held=($it)" } ?: "") +
+            " shizuku=${h.shizuku} audio_method=${settings.audioMethod}:${audioMethodName(settings.audioMethod)}" +
+            " audioReady=${h.audioReady} tap=${if (audio.active) audio.backend else "idle"}" +
+            " earpiece_mute=${onOff(settings.muteEarpiece)} loopback=${onOff(h.loopbackTest)}" +
+            " calls=${h.calls.summary}" + (if (h.settingsPending) " settingsPending" else "")
+    }
+
+    /** Effective (queued if a call is active) settings, never the password itself. */
+    fun settingsLine(): String {
+        val s = pendingSettings ?: settings
+        return "stack=${s.sipStack.id} server=${s.server}:${s.port}/${s.sipTransport} srtp=${s.srtp}" +
+            " domain=${s.domain.ifEmpty { "(server)" }} user=${s.username}" +
+            " password=${if (s.password.isEmpty()) "unset" else "set"} target=${s.inboundTarget.ifEmpty { "(user)" }}" +
+            " prefixes=${s.allowedPrefixes.ifEmpty { "(any)" }}" +
+            " audio_method=${s.audioMethod}:${audioMethodName(s.audioMethod)} call_access=${s.callAccess}" +
+            " earpiece_mute=${onOff(s.muteEarpiece)} hold_sip=${onOff(s.holdSipWhenNotReady)} sip_debug=${onOff(s.sipDebugLog)}" +
+            (if (pendingSettings != null) " (applies after current calls end)" else "")
+    }
+
+    private fun onOff(on: Boolean) = if (on) "on" else "off"
+
+    private fun audioMethodName(method: Int) = when (method) {
+        AudioMethod.LEGACY -> "direct"
+        AudioMethod.OFFICIAL -> "redirection"
+        else -> "auto"
+    }
+
     fun statusReport(): String {
         val h = _health.value
         return buildString {
