@@ -1,6 +1,7 @@
 package io.github.sparkcyf.voicesipagent.pjsua2
 
 import io.github.sparkcyf.voicesipagent.voice.AbstractCallLeg
+import io.github.sparkcyf.voicesipagent.voice.CallLeg
 import io.github.sparkcyf.voicesipagent.voice.EndpointStatus
 import io.github.sparkcyf.voicesipagent.voice.HangupCause
 import io.github.sparkcyf.voicesipagent.voice.LegDirection
@@ -14,6 +15,94 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 class PjsipEndpointLifecycleTest {
+    @Test fun libraryReleaseCompletionRemainsPendingAfterTheStopWaitTimesOut() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val warnings = CopyOnWriteArrayList<String>()
+        val worker = PjsuaWorker({}, { Thread.sleep(1) }, {
+            entered.countDown()
+            check(release.await(10, TimeUnit.SECONDS))
+        }, { throw AssertionError(it) })
+        val libraryWorker = PjsuaLib::class.java.getDeclaredField("worker").apply { isAccessible = true }
+            .get(PjsuaLib) as PjsuaWorker
+        val session = PjsuaWorker::class.java.getDeclaredField("session").apply { isAccessible = true }
+        val original = session.get(libraryWorker)
+        val oldLog = PjsuaLib.log
+        val startup = PjsipEndpoint::class.java.getDeclaredField("startup").apply { isAccessible = true }
+            .get(null) as ThreadPoolExecutor
+        try {
+            worker.start()
+            session.set(libraryWorker, session.get(worker))
+            PjsuaLib.log = object : PjsipLog {
+                override fun info(msg: String) {}
+                override fun warn(msg: String, t: Throwable?) { warnings += msg }
+            }
+            val stopped = PjsipEndpoint.stopLibrary()
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            // The startup queue resumes after the existing 5 s stop wait, without retrying release.
+            startup.submit {}.get(6, TimeUnit.SECONDS)
+            assertTrue(warnings.contains("SIP library shutdown failed"))
+            assertFalse(stopped.isDone)
+            release.countDown()
+            stopped.get(3, TimeUnit.SECONDS)
+        } finally {
+            release.countDown()
+            try { worker.stop() } finally {
+                session.set(libraryWorker, original)
+                PjsuaLib.log = oldLog
+            }
+        }
+    }
+
+    @Test fun timedOutCleanupContinuesAndOneFailedHangupDoesNotSkipTheNextCall() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val warnings = CopyOnWriteArrayList<String>()
+        val worker = PjsuaWorker({}, {
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            Thread.sleep(1)
+        }, {}, { throw AssertionError(it) })
+        // Use the real queue/stop protocol without loading the device-only JNI library.
+        val field = PjsuaLib::class.java.getDeclaredField("worker").apply { isAccessible = true }
+        val libraryWorker = field.get(PjsuaLib) as PjsuaWorker
+        val session = PjsuaWorker::class.java.getDeclaredField("session").apply { isAccessible = true }
+        val original = session.get(libraryWorker)
+        val endpoint = PjsipEndpoint(PjsipConfig(server = "pbx.invalid", username = "test", password = "test"),
+            object : PjsipLog {
+                override fun info(msg: String) {}
+                override fun warn(msg: String, t: Throwable?) { warnings += msg }
+            })
+        val first = PjsipCall(endpoint, LegDirection.OUTBOUND, Party("test"), "test", "p1")
+        val second = PjsipCall(endpoint, LegDirection.OUTBOUND, Party("test"), "test", "p2")
+        first.addListener(object : CallLeg.Listener {
+            override fun onStateChanged(leg: CallLeg, state: LegState) { error("listener failed") }
+        })
+        endpoint.calls[1] = first
+        endpoint.calls[2] = second
+        setStatus(endpoint, EndpointStatus(true, "registered"))
+        endpoint.addStatusListener { _, _ -> error("status listener failed") }
+        try {
+            worker.start()
+            session.set(libraryWorker, session.get(worker))
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            endpoint.stop(timeoutMs = 10, releaseTransport = false)
+            assertTrue(warnings.any { it.contains("cleanup wait timed out") })
+            assertEquals(LegState.NEW, second.state)
+            val cleaned = CountDownLatch(1)
+            assertTrue(worker.post { cleaned.countDown() })
+            release.countDown()
+            assertTrue(cleaned.await(2, TimeUnit.SECONDS))
+            assertEquals(LegState.ENDED, first.state)
+            assertEquals(LegState.ENDED, second.state)
+            assertTrue(warnings.contains("call hangup failed"))
+            assertTrue(warnings.contains("SIP stopped status notification failed"))
+        } finally {
+            release.countDown()
+            try { worker.stop() } finally { session.set(libraryWorker, original) }
+        }
+    }
+
     @Test fun workerFailureClearsReadinessAndEndsCallsWithoutWaitingForNativeCallbacks() {
         val endpoint = endpoint()
         val statuses = mutableListOf<EndpointStatus>()

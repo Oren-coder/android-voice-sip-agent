@@ -104,15 +104,45 @@ class SipShutdownTest {
                 val lateTask = AtomicInteger()
                 ua.schedule(60_000) { lateTask.incrementAndGet() }
                 // The local peer deliberately never answers either REGISTER.
-                ua.stop(timeoutMs = 50)
+                assertTrue(ua.stop(timeoutMs = 50).isDone)
+                // stop now waits for local release, independently of worker termination.
+                DatagramSocket(port).use { assertEquals(port, it.localPort) }
                 thread.get().join(2000)
                 assertFalse(thread.get().isAlive)
                 assertFalse(ua.status.ready)
                 assertEquals("stopped", ua.status.detail)
                 assertEquals(0, lateTask.get())
-                DatagramSocket(port).use { assertEquals(port, it.localPort) }
             } finally {
                 if (thread.get()?.isAlive == true) ua.stop(timeoutMs = 50)
+            }
+        }
+    }
+
+    @Test fun socketReleaseCompletionSurvivesABoundedStopTimeout() {
+        DatagramSocket(0).use { peer ->
+            val warnings = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val ua = SipUserAgent(SipConfig(SipAccount("127.0.0.1", peer.localPort, "test", "test"), localPort = 0),
+                object : SipLog {
+                    override fun info(msg: String) {}
+                    override fun warn(msg: String, t: Throwable?) { warnings += msg }
+                })
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            try {
+                ua.start()
+                ua.post { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                val port = ua.transport.localPort
+                val stopped = ua.stop(timeoutMs = 10)
+                assertFalse(stopped.isDone)
+                assertTrue(warnings.any { it.contains("socket release wait timed out") })
+                assertSame(stopped, ua.stop(timeoutMs = 0))
+                release.countDown()
+                stopped.get(3, TimeUnit.SECONDS)
+                DatagramSocket(port).use { assertEquals(port, it.localPort) }
+            } finally {
+                release.countDown()
+                ua.stop(timeoutMs = 10).get(3, TimeUnit.SECONDS)
             }
         }
     }

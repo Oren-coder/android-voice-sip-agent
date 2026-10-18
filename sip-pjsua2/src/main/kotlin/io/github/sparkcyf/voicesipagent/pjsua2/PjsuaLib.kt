@@ -87,6 +87,8 @@ internal object PjsuaLib {
     @Synchronized
     fun stop() = worker.stop()
 
+    fun releaseCompletion() = worker.releaseCompletion()
+
     /** The local address may have changed: rebind, re-register and re-INVITE active calls. */
     fun handleIpChange() = post {
         try {

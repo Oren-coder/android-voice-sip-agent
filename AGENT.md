@@ -128,6 +128,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
 - **SIP (`:sip`)**: UDP; all protocol state runs on a single `sip-ua` scheduler thread (`post {}`). Outbound calls
   carry the caller number in `P-Asserted-Identity`; for inbound calls the cellular number to dial comes from the
   `X-VSA-Dial` header, falling back to the Request-URI user part. PCMU/PCMA + telephone-event(101) only.
+  `stop()` waits for best-effort unregister, then up to 1 s for queued socket closure. Its returned future
+  reports local socket release, including cleanup that finishes after the bounded wait; repeated stops
+  return the same completion. A PBX reply is not required to release the socket.
 - **SIP (`:sip-pjsua2`)**: `PjsipEndpoint` implements `CallEndpoint` with the same trunk semantics as `:sip`.
   - pjsua is a process singleton: ordinary endpoint restarts reuse `PjsuaLib`; restarting the endpoint only
     adds/removes accounts, transports (keyed by type + port) are kept and reused. Every pjsua call and SIP callback
@@ -171,6 +174,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     zero-expiry response (≤1.5 s): the new account reuses the same Contact, and a late un-REGISTER
     could remove the new binding. If the native unregister request throws, cleanup skips the wait;
     unregistration remains best effort.
+    Rejected cleanup submissions, wait timeouts and individual cleanup failures are logged. Failed call
+    hangups or account operations do not skip subsequent cleanup. `transportClose` is graceful and can
+    retain the socket; only successful `stopLibrary()` completion confirms native destruction.
   - Build patches (`native/`): `config_site.h`, `pjsua2-java-ext.i` (bulk-copy typemap for ByteVector; must come
     before `%template(ByteVector)`; SWIG director threads stay attached), `pjsua2-java-profile.i` (feature-group
     exclusions applied after upstream director declarations; retain Account/Call/AudioMediaPort/LogWriter
@@ -203,6 +209,10 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   cellular side minus SIP itself is not ready: held from each gateway start until first ready, then only
   after a 45 s grace period; readiness re-registers at once. Hold changes go through `startSip()`/`stopSip()`
   (pjsua2 keeps library and transport) and are deferred while calls or a bridge session exist.
+  Replacement SIP endpoints wait for pending local socket release, including native destruction when
+  leaving pjsua2. Completion returns to `gateway-runtime` and checks endpoint identity and gateway state
+  before starting, so rapid restarts/off-on cannot start an obsolete endpoint. Release failures leave
+  the replacement unavailable and are logged; ordinary pjsua2 account restarts still reuse the library.
   While takeover is enabled and the service is foreground, a health check runs every 60 s and re-runs setup while idle if
   companion mode is selected, and call access is unavailable. The override alone does not gate readiness;
   health checks never request the dialer role.

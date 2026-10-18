@@ -17,6 +17,7 @@ import org.pjsip.pjsua2.OnIncomingCallParam
 import org.pjsip.pjsua2.OnRegStateParam
 import org.pjsip.pjsua2.pjmedia_srtp_use
 import java.net.InetAddress
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
@@ -109,34 +110,48 @@ class PjsipEndpoint(
 
     /**
      * Hangs up calls and unregisters. Blocks up to [timeoutMs]. With [releaseTransport] the local SIP
-     * port is closed too (after the unregister completes); otherwise it is kept for the next endpoint.
+     * transport is closed gracefully too; socket release requires [stopLibrary]. Otherwise it is
+     * kept for the next endpoint. A wait timeout does not cancel the queued cleanup.
      */
     fun stop(timeoutMs: Long = 2000, releaseTransport: Boolean = true) {
         stopped = true
-        setStatus(STOPPED)
+        runCatching { setStatus(STOPPED) }.onFailure { log.warn("SIP stopped status notification failed", it) }
         if (!PjsuaLib.running) return
         val done = CountDownLatch(1)
-        PjsuaLib.post {
+        val accepted = PjsuaLib.tryPost {
             try {
-                rtpCheck?.cancel(false)
-                calls.values.toList().forEach { it.doHangup(HangupCause.NORMAL) }
+                runCatching { rtpCheck?.cancel(false) }.onFailure { log.warn("RTP polling cleanup failed", it) }
+                calls.values.toList().forEach { leg ->
+                    runCatching { leg.doHangup(HangupCause.NORMAL) }.onFailure { log.warn("call hangup failed", it) }
+                }
                 account?.let { acc ->
                     // Registration may still be pending. Wait for an accepted unregister before a
                     // successor reuses the same Contact, or a late unregister could remove its binding.
-                    if (runCatching { acc.setRegistration(false) }.isSuccess) {
+                    runCatching {
+                        acc.setRegistration(false)
                         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1500)
                         while (!unregistered && System.nanoTime() < deadline) PjsuaLib.ep.libHandleEvents(20)
-                    }
+                        if (!unregistered) log.warn("SIP unregister wait timed out; continuing cleanup")
+                    }.onFailure { log.warn("SIP unregister failed", it) }
                     // shutdown() detaches from pjsua; the Java wrapper must be freed explicitly.
-                    try { acc.shutdown() } finally { acc.delete(); account = null }
+                    runCatching { acc.shutdown() }.onFailure { log.warn("account shutdown failed", it) }
+                    try {
+                        runCatching { acc.delete() }.onFailure { log.warn("account deletion failed", it) }
+                    } finally { account = null }
                 }
-                if (releaseTransport) PjsuaLib.closeTransport(config.transport, config.localPort)
+                if (releaseTransport) runCatching { PjsuaLib.closeTransport(config.transport, config.localPort) }
+                    .onFailure { log.warn("transport cleanup failed", it) }
             } finally {
                 PjsuaLib.removeFailureListener(failureListener)
                 done.countDown()
             }
         }
-        done.await(timeoutMs, TimeUnit.MILLISECONDS)
+        if (!accepted) {
+            // Keep the failure listener: the exiting owner may still need to clean up the account.
+            log.warn("SIP endpoint cleanup rejected: worker is stopping")
+        } else if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            log.warn("SIP endpoint cleanup wait timed out; queued cleanup will continue")
+        }
     }
 
     /** Owner thread, or startup before an account exists if the worker already exited. */
@@ -298,10 +313,20 @@ class PjsipEndpoint(
             Thread(task, "sip-startup").apply { isDaemon = true }
         }
 
-        /** Queues native teardown after pending startup work. Stop all endpoints before calling. */
-        fun stopLibrary() { startup.execute {
-            runCatching { PjsuaLib.stop() }.onFailure { PjsuaLib.log.warn("SIP library shutdown failed", it) }
-        } }
+        /** Completes after native destruction releases sockets. Stop all endpoints before calling. */
+        fun stopLibrary(): CompletableFuture<Unit> {
+            val released = CompletableFuture<Unit>()
+            startup.execute {
+                val completion = PjsuaLib.releaseCompletion()
+                runCatching { PjsuaLib.stop() }.onFailure { PjsuaLib.log.warn("SIP library shutdown failed", it) }
+                // A bounded wait can expire while destruction is still running. Keep waiting
+                // asynchronously for actual socket release rather than retrying accepted cleanup.
+                completion.whenComplete { _, failure ->
+                    if (failure == null) released.complete(Unit) else released.completeExceptionally(failure)
+                }
+            }
+            return released
+        }
 
         /** Passes pjsip's info-level log lines through (call/registration traces). Off by default. */
         fun setVerboseLogging(on: Boolean) {

@@ -44,6 +44,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 
@@ -137,6 +138,8 @@ class GatewayRuntime private constructor(context: Context) {
     )
     /** [SipUserAgent] or [PjsipEndpoint], per [GatewaySettings.sipStack]. */
     private var sip: CallEndpoint? = null
+    /** Includes socket cleanup still queued after a bounded stop wait. */
+    private var sipSocketRelease = CompletableFuture.completedFuture(Unit)
     private var bridge: CallBridge? = null
     private var echo: EchoEndpoint? = null
     private var started = false
@@ -712,7 +715,6 @@ class GatewayRuntime private constructor(context: Context) {
                     sipLog,
                 ).also { ua ->
                     ua.addStatusListener { ep, st -> sipStatus(ep, st) }
-                    ua.start()
                 }
                 SipStack.PJSUA2 -> PjsipEndpoint(
                     PjsipConfig(
@@ -729,12 +731,26 @@ class GatewayRuntime private constructor(context: Context) {
                     pjLog,
                 ).also { pj ->
                     pj.addStatusListener { ep, st -> sipStatus(ep, st) }
-                    pj.start()
                 }
             }
             sip = ep
             _health.update { it.copy(sip = ep.status) }
             AppLog.i("SIP stack: ${s.sipStack.id}")
+            sipSocketRelease.whenComplete { _, failure -> worker.execute {
+                // A later restart, hold or switch-off may have replaced this endpoint while waiting.
+                if (sip !== ep || !gatewayEnabled) return@execute
+                try {
+                    if (failure != null) throw IllegalStateException("previous SIP socket release failed", failure)
+                    when (ep) {
+                        is SipUserAgent -> ep.start()
+                        is PjsipEndpoint -> ep.start()
+                    }
+                } catch (t: Throwable) {
+                    AppLog.w("SIP start failed", t)
+                    _health.update { it.copy(sip = EndpointStatus(false, "start failed: ${t.message}")) }
+                    updateReadiness()
+                }
+            } }
         } catch (e: Throwable) {
             AppLog.w("SIP start failed", e)
             _health.update { it.copy(sip = EndpointStatus(false, "start failed: ${e.message}")) }
@@ -746,7 +762,7 @@ class GatewayRuntime private constructor(context: Context) {
         sip = null
         try {
             when (val s = previous) {
-                is SipUserAgent -> s.stop()
+                is SipUserAgent -> trackSipSocketRelease(s.stop())
                 is PjsipEndpoint -> {
                     // Keep the SIP socket only if pjsua2 is about to take it over again.
                     val n = settings
@@ -758,8 +774,12 @@ class GatewayRuntime private constructor(context: Context) {
             }
         } finally {
             if (releaseLibrary || !_health.value.takeover || settings.sipStack != SipStack.PJSUA2)
-                PjsipEndpoint.stopLibrary()
+                trackSipSocketRelease(PjsipEndpoint.stopLibrary())
         }
+    }
+
+    private fun trackSipSocketRelease(released: CompletableFuture<Unit>) {
+        sipSocketRelease = CompletableFuture.allOf(sipSocketRelease, released).thenApply { }
     }
 
     private fun refreshSipRegistration() {

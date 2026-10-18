@@ -27,6 +27,8 @@ import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 import io.github.sparkcyf.voicesipagent.telephony.CallSnapshot
 import io.github.sparkcyf.voicesipagent.telephony.CellularEndpoint
+import io.github.sparkcyf.voicesipagent.sip.SipUserAgent
+import io.github.sparkcyf.voicesipagent.sip.SipConfig
 import io.github.sparkcyf.voicesipagent.voice.EndpointStatus
 import io.github.sparkcyf.voicesipagent.voice.EndpointStatusListener
 import io.github.sparkcyf.voicesipagent.voice.HangupCause
@@ -36,9 +38,81 @@ import org.mockito.MockedConstruction
 import org.mockito.Mockito.*
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class GatewayRuntimeLifecycleTest {
+    @Test fun switchingToBuiltinWaitsForNativeSocketRelease(): Unit =
+        Fixture(enabled = true, holder = "gateway", healthy = true).use { f ->
+            f.connect()
+            withStartupBlocked { release ->
+                f.runtime.applySettings { it.copy(sipStack = SipStack.BUILTIN, sipTransport = "udp") }
+                f.drain()
+                val replacement = f.builtin.constructed().single()
+                verify(f.endpoints.constructed().single()).stop(releaseTransport = true)
+                verify(replacement, never()).start()
+                release()
+                f.drain()
+                verify(replacement).start()
+            }
+        }
+
+    @Test fun switchingFromBuiltinWaitsForItsSocketEvenAcrossAnotherRestart(): Unit =
+        Fixture(enabled = true, holder = "gateway", healthy = true).use { f ->
+            f.connect()
+            f.runtime.applySettings { it.copy(sipStack = SipStack.BUILTIN, sipTransport = "udp") }
+            f.awaitNativeShutdown()
+            val old = f.builtin.constructed().single()
+            verify(old).start()
+            val released = CompletableFuture<Unit>()
+            doReturn(released).`when`(old).stop(anyLong())
+            f.runtime.applySettings { it.copy(sipStack = SipStack.PJSUA2) }
+            f.drain()
+            val cancelled = f.endpoints.constructed().last()
+            verify(cancelled, never()).start()
+            f.runtime.restartSip()
+            f.drain()
+            val current = f.endpoints.constructed().last()
+            verify(current, never()).start()
+            released.complete(Unit)
+            f.drain()
+            verify(cancelled, never()).start()
+            verify(current).start()
+        }
+
+    @Test fun failedSocketReleaseLeavesReplacementUnavailableAndTakeoverEnabled(): Unit =
+        Fixture(enabled = true, holder = "gateway", healthy = true).use { f ->
+            f.connect()
+            f.runtime.applySettings { it.copy(sipStack = SipStack.BUILTIN, sipTransport = "udp") }
+            f.awaitNativeShutdown()
+            val released = CompletableFuture<Unit>()
+            released.completeExceptionally(IllegalStateException("socket cleanup failed"))
+            doReturn(released).`when`(f.builtin.constructed().single()).stop(anyLong())
+            f.runtime.applySettings { it.copy(username = "changed") }
+            // Successful native teardown must not hide the built-in socket release failure.
+            f.awaitNativeShutdown()
+            verify(f.builtin.constructed().last(), never()).start()
+            assertFalse(f.runtime.health.value.cellularReady)
+            assertEquals("start failed: previous SIP socket release failed", f.runtime.health.value.sip.detail)
+            assertTrue(f.runtime.settings.takeover)
+        }
+
+    private fun withStartupBlocked(block: (() -> Unit) -> Unit) {
+        val startup = startupExecutor()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        startup.execute { entered.countDown(); check(release.await(10, TimeUnit.SECONDS)) }
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            block { release.countDown(); startup.submit {}.get(3, TimeUnit.SECONDS) }
+        } finally {
+            release.countDown()
+            startup.submit {}.get(3, TimeUnit.SECONDS)
+        }
+    }
+
     @Test fun sipWorkerFailureClearsReadinessAndPreservesTakeoverUntilExplicitReconnect(): Unit =
         Fixture(enabled = true, holder = "gateway", healthy = true).use { f ->
             f.connect()
@@ -392,6 +466,8 @@ class GatewayRuntimeLifecycleTest {
             private set
         lateinit var endpoints: MockedConstruction<PjsipEndpoint>
             private set
+        lateinit var builtin: MockedConstruction<SipUserAgent>
+            private set
         lateinit var bridges: MockedConstruction<CallBridge>
             private set
         lateinit var callsChanged: (CallSnapshot) -> Unit
@@ -483,6 +559,11 @@ class GatewayRuntimeLifecycleTest {
                     doAnswer { sipListener = it.getArgument(0); null }.`when`(endpoint).addStatusListener(
                         any(EndpointStatusListener::class.java) ?: EndpointStatusListener { _, _ -> })
                 }.also { workerScopes += it }
+                builtin = mockConstruction(SipUserAgent::class.java) { endpoint, construction ->
+                    `when`(endpoint.config).thenReturn(construction.arguments()[0] as SipConfig)
+                    `when`(endpoint.status).thenReturn(EndpointStatus(false, "test endpoint"))
+                    `when`(endpoint.stop(anyLong())).thenReturn(CompletableFuture.completedFuture(Unit))
+                }.also { workerScopes += it }
                 bridges = mockConstruction(CallBridge::class.java) { _, construction ->
                     dialPolicy = construction.arguments()[5] as DialPolicy
                 }.also { workerScopes += it }
@@ -523,6 +604,11 @@ class GatewayRuntimeLifecycleTest {
             }.get(3, TimeUnit.SECONDS)
             drain()
         }
+        fun awaitNativeShutdown() {
+            drain()
+            startupExecutor().submit {}.get(3, TimeUnit.SECONDS)
+            drain()
+        }
         fun drain() {
             do {
                 val pending = worker.submit<Boolean> {
@@ -537,5 +623,10 @@ class GatewayRuntimeLifecycleTest {
             worker.shutdownNow()
             scopes.asReversed().forEach { it.close() }
         }
+    }
+
+    companion object {
+        private fun startupExecutor() = PjsipEndpoint::class.java.getDeclaredField("startup")
+            .apply { isAccessible = true }.get(null) as ThreadPoolExecutor
     }
 }

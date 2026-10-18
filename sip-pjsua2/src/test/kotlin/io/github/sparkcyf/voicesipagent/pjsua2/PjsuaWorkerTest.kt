@@ -3,6 +3,7 @@ package io.github.sparkcyf.voicesipagent.pjsua2
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CompletionException
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -11,6 +12,19 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class PjsuaWorkerTest {
+    @Test fun failedDestructionFailsTheReleaseCompletion() {
+        val errors = CopyOnWriteArrayList<Throwable>()
+        val failure = IllegalStateException("destroy failed")
+        val worker = PjsuaWorker({}, { Thread.sleep(1) }, { throw failure }, { errors += it })
+        worker.start()
+        val released = worker.releaseCompletion()
+        worker.stop()
+        val reported = assertThrows(CompletionException::class.java) { released.join() }
+        assertSame(failure, reported.cause)
+        assertEquals(listOf(failure), errors)
+        assertFalse(worker.running)
+    }
+
     @Test fun explicitRestartWaitsForFailedLibraryDestructionBeforeInitializingAgain() {
         val attempts = AtomicInteger()
         val failPoll = CountDownLatch(1)

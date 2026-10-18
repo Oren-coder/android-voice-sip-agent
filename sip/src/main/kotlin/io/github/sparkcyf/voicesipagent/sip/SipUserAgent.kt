@@ -13,11 +13,13 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.security.SecureRandom
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * A single-account SIP user agent over UDP, exposed to the rest of the app as a [CallEndpoint].
@@ -61,6 +63,7 @@ class SipUserAgent(
     private var regAuthAttempts = 0
     private var started = false
     private var stopping = false
+    private var stopped: CompletableFuture<Unit>? = null
 
     private val account get() = config.account
     internal val aor: String get() = "sip:${account.username}@${account.domain}"
@@ -78,24 +81,65 @@ class SipUserAgent(
         register()
     }
 
-    /** Unregisters, hangs up all calls and releases sockets. Blocks up to [timeoutMs]. */
-    fun stop(timeoutMs: Long = 2000) {
+    /** Best-effort unregister (up to [timeoutMs]), then waits up to 1 s for local socket release. */
+    @Synchronized
+    fun stop(timeoutMs: Long = 2000): CompletableFuture<Unit> {
+        stopped?.let { return it }
+        val released = CompletableFuture<Unit>()
+        stopped = released
         val done = CountDownLatch(1)
         post {
-            if (!started) { done.countDown(); return@post }
-            stopping = true
-            calls.values.toList().forEach { it.hangup(HangupCause.NORMAL) }
-            regRefresh?.cancel(false)
-            if (!::serverAddr.isInitialized) { done.countDown(); return@post }
-            sendRegister(0, null) { done.countDown() }
+            try {
+                if (!started) { done.countDown(); return@post }
+                stopping = true
+                calls.values.toList().forEach { leg ->
+                    runCatching { leg.hangup(HangupCause.NORMAL) }.onFailure { log.warn("call hangup failed", it) }
+                }
+                regRefresh?.cancel(false)
+                if (!::serverAddr.isInitialized) { done.countDown(); return@post }
+                sendRegister(0, null) { done.countDown() }
+            } catch (t: Throwable) {
+                log.warn("SIP unregister failed", t)
+                done.countDown()
+            }
         }
-        done.await(timeoutMs, TimeUnit.MILLISECONDS)
-        post {
-            if (::transport.isInitialized) transport.close()
-            started = false
-            setStatus(false, "stopped")
+        try {
+            if (!done.await(timeoutMs, TimeUnit.MILLISECONDS))
+                log.warn("SIP unregister wait timed out; releasing local socket")
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            log.warn("SIP unregister wait interrupted; releasing local socket")
+        } finally {
+            // Completion means local release, independently of an unregister reply or status listener.
+            try {
+                executor.execute {
+                    try {
+                        if (::transport.isInitialized) transport.close()
+                        released.complete(Unit)
+                    } catch (t: Throwable) {
+                        log.warn("SIP socket release failed", t)
+                        released.completeExceptionally(t)
+                    } finally {
+                        started = false
+                        runCatching { setStatus(false, "stopped") }
+                            .onFailure { log.warn("SIP stopped status notification failed", it) }
+                    }
+                }
+            } catch (t: Throwable) {
+                log.warn("SIP socket cleanup rejected", t)
+                released.completeExceptionally(t)
+            } finally { executor.shutdown() }
         }
-        executor.shutdown()
+        try {
+            released.get(1000, TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            log.warn("SIP socket release wait timed out; queued cleanup will continue")
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } catch (_: java.util.concurrent.ExecutionException) {
+            // The failure was logged by the cleanup task and is available to its caller.
+        }
+        return released
     }
 
     /** Call when the network changes: refreshes our address and re-registers. */

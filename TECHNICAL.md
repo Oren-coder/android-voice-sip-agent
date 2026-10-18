@@ -64,6 +64,10 @@ holds the role, restore your usual phone app before using companion mode. Both m
 Switching takeover off waits for owned calls and bridge cleanup, then unregisters SIP, queues teardown of the native
 pjsua2 library, cancels health/dialer polling, unregisters network monitoring, and releases this app's Shizuku
 helper after handoff cleanup. The shared Shizuku server keeps running. Switching on starts a new gateway lifetime.
+SIP stack changes wait for the old stack's local socket release before starting the replacement. Native
+release waits for library destruction; ordinary pjsua2 reconnects reuse the library and transport.
+Unregister remains best effort. Cleanup failures and bounded wait timeouts appear in the local log;
+timing out does not cancel queued cleanup. A failed socket release leaves the replacement unavailable.
 In companion mode, switching takeover off also stops the foreground service and removes its notification;
 idle gateway standby keeps both running. In dialer mode, the service keeps a reminder visible while this app
 is the default dialer, even with gateway work stopped. Service destruction also releases gateway resources

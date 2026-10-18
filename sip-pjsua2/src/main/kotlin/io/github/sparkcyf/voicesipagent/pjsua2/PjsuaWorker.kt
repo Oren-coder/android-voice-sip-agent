@@ -1,6 +1,7 @@
 package io.github.sparkcyf.voicesipagent.pjsua2
 
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
@@ -21,6 +22,7 @@ internal class PjsuaWorker(
             Thread(task, "pjsua-timer").apply { isDaemon = true }
         }.apply { removeOnCancelPolicy = true }
         @Volatile var stopping = false
+        val released = CompletableFuture<Unit>()
         lateinit var thread: Thread
     }
 
@@ -60,7 +62,13 @@ internal class PjsuaWorker(
                 // A failed poll may already have queued wrapper deletions from native callbacks.
                 // The termination handler also ends calls and queues their remaining cleanup.
                 try { drain(current) } finally {
-                    try { release() } catch (t: Throwable) { onFailure(t) }
+                    try {
+                        release()
+                        current.released.complete(Unit)
+                    } catch (t: Throwable) {
+                        current.released.completeExceptionally(t)
+                        onFailure(t)
+                    }
                 }
             }
         }, "pjsua").apply { isDaemon = true; priority = Thread.MAX_PRIORITY - 1 }
@@ -106,6 +114,9 @@ internal class PjsuaWorker(
         val current = session ?: error("pjsua2 stopped")
         return current.timers.scheduleWithFixedDelay({ enqueue(current, task) }, period, period, TimeUnit.MILLISECONDS)
     }
+
+    /** Actual native release, independently of the caller's bounded stop wait. */
+    fun releaseCompletion(): CompletableFuture<Unit> = session?.released ?: CompletableFuture.completedFuture(Unit)
 
     /** Called after the endpoint has removed its account and calls; never on the pjsua thread. */
     fun stop() {
