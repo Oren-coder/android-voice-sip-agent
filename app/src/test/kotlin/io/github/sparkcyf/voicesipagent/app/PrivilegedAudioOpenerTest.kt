@@ -33,8 +33,11 @@ class PrivilegedAudioOpenerTest {
     @After fun teardown() { log.close() }
 
     private fun opener(mute: Boolean = false,
+        directMuteBlocked: Boolean = false,
+        onIncompatible: () -> Unit = {},
         factory: (ParcelFileDescriptor, PcmFormat, (String) -> Unit) -> PcmSocketPort = { _, _, _ -> port }) =
-        PrivilegedAudioOpener(connector, { AudioMethod.AUTO }, { mute }, { PcmFormat.NARROWBAND }, factory)
+        PrivilegedAudioOpener(connector, { AudioMethod.AUTO }, { mute }, { PcmFormat.NARROWBAND }, factory,
+            directMuteBlocked = { directMuteBlocked }, onDirectMuteIncompatible = onIncompatible)
 
     private fun report(status: CallAudioStatus) {
         val bundle = mock(Bundle::class.java)
@@ -48,6 +51,8 @@ class PrivilegedAudioOpenerTest {
         doReturn(status.restoreDetail).`when`(bundle).getString("restore_detail")
         doReturn(status.voiceCallStreamMuted != null).`when`(bundle).containsKey("voice_call_stream_muted")
         doReturn(status.voiceCallStreamMuted == true).`when`(bundle).getBoolean("voice_call_stream_muted")
+        doReturn(status.directMuteIncompatible).`when`(bundle).getBoolean("direct_mute_incompatible")
+        doReturn(status.recoveryDetail).`when`(bundle).getString("recovery_detail")
         doReturn(bundle).`when`(service).callAudioStatus()
     }
 
@@ -186,5 +191,44 @@ class PrivilegedAudioOpenerTest {
         verify(service).setLocalOutputMuted(false)
         assertFalse(opener.status.value.restorationPending)
         assertFalse(opener.status.value.ownsOutputChange)
+    }
+
+    @Test fun knownIncompatibleDeviceBlocksDirectStreamMuteBeforeTheTapOpens() {
+        val handle = opener(mute = true, directMuteBlocked = true).open {}
+        val order = inOrder(service)
+        order.verify(service).setDirectOutputMuteBlocked(true)
+        order.verify(service).openCallAudio(AudioMethod.AUTO, 8000)
+        order.verify(service).setLocalOutputMuted(true)
+        handle.close()
+        // Without a mute request there is nothing to block.
+        opener(mute = false, directMuteBlocked = true).open {}.close()
+        verify(service).setDirectOutputMuteBlocked(false)
+    }
+
+    @Test fun blockTransactionFailureDoesNotPreventTheTap() {
+        doThrow(IllegalStateException("old helper")).`when`(service).setDirectOutputMuteBlocked(anyBoolean())
+        val handle = opener(mute = true, directMuteBlocked = true).open {}
+        assertSame(port, handle.port)
+        handle.close()
+    }
+
+    @Test fun inCallMuteIncompatibilityIsReportedOnceAndKeepsTheTap() {
+        var reported = 0
+        report(CallAudioStatus(active = true, backend = "direct", muteRequested = true,
+            outputMute = CallAudioStatus.APPLIED, ownsOutputChange = true, voiceCallStreamMuted = true))
+        val opener = opener(mute = true, onIncompatible = { reported++ })
+        val handle = opener.open {}
+        val recovered = CallAudioStatus(active = true, backend = "direct", muteRequested = true,
+            outputMute = CallAudioStatus.UNSUPPORTED, muteDetail = "unsupported: voice-call stream mute stopped direct capture",
+            voiceCallStreamMuted = false, directMuteIncompatible = true,
+            recoveryDetail = "re-created direct record after record read 0 at 8000 Hz with voice-call stream muted")
+        report(recovered)
+        opener.refreshStatus()
+        opener.refreshStatus()
+        assertEquals(1, reported)
+        assertEquals(recovered.copy(available = true), opener.status.value)
+        assertTrue(opener.status.value.active)
+        verify(service, never()).closeCallAudio()
+        handle.close()
     }
 }

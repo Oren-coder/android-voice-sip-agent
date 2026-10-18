@@ -79,6 +79,7 @@ private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modif
     chooseDialer: () -> Unit, cancelDialer: () -> Unit, setTakeover: (Boolean) -> Unit, roleMessage: String) {
     val h by rt.health.collectAsState()
     val callAudio by rt.callAudioStatus.collectAsState()
+    val directMuteIncompatible by rt.directMuteIncompatible.collectAsState()
     val pendingSettings by rt.pendingSettingsFlow.collectAsState()
     val log by AppLog.tail.collectAsState()
     Column(
@@ -133,6 +134,8 @@ private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modif
                     (h.privileged?.get(HealthKeys.LOCAL_SUPPRESSION) != true || !h.audioReady)
                 if (cur.muteEarpiece && unavailable)
                     "Playback muting cannot be attempted with the current setup. The phone microphone remains muted during gateway calls. Changes apply to the next call."
+                else if (cur.muteEarpiece && directMuteIncompatible)
+                    "Muting stopped direct telephony audio on this phone, so it is skipped when that method is used. Turn this off and on again to retest."
                 else
                     "When enabled, attempts to silence the earpiece or speaker. The phone microphone remains muted during gateway calls. Changes apply to the next call."
             }
@@ -180,8 +183,12 @@ private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modif
                     callAudio.outputMute == CallAudioStatus.APPLIED -> "mute request applied"
                     callAudio.outputMute == CallAudioStatus.PRESERVED -> "existing mute preserved"
                     callAudio.outputMute == CallAudioStatus.NOT_APPLIED -> "mute request not applied"
+                    callAudio.outputMute == CallAudioStatus.UNSUPPORTED -> "muting unsupported with this audio method"
                     else -> "mute state unknown"
                 })
+                if (callAudio.available && callAudio.recoveryDetail.isNotEmpty()) {
+                    Text("Audio recovered: ${callAudio.recoveryDetail}", style = MaterialTheme.typography.bodySmall)
+                }
                 Text("Next call: playback muting ${if (cur.muteEarpiece) "requested" else "off"}.",
                     style = MaterialTheme.typography.bodySmall)
             } else if (h.calls.owned > 0 || h.session != null) {

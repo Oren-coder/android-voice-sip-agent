@@ -194,4 +194,82 @@ class LocalOutputMuteTest {
         assertEquals(CallAudioStatus.NOT_APPLIED, mute.observedMute())
     }
 
+    @Test fun captureFailureRightAfterStreamMuteWithdrawsItAndRefusesItForTheCall() {
+        val audio = Audio()
+        var now = 1_000L
+        val mute = LocalOutputMute(audio) { now }
+        mute.beginCall()
+        mute.mute(false)
+        now += 500
+        assertEquals("restored voice-call stream (direct capture failed)",
+            mute.withdrawForCaptureFailure("record read 0 at 16000 Hz"))
+        assertFalse(audio.voiceCallMuted)
+        assertTrue(mute.directMuteIncompatible)
+        assertFalse(mute.ownsOutputChange)
+        assertEquals(CallAudioStatus.UNSUPPORTED, mute.observedMute())
+        assertTrue(mute.lastMuteResult.startsWith("unsupported: voice-call stream mute stopped direct capture"))
+        assertTrue(mute.mute(false).startsWith("unsupported:"))
+        assertEquals(listOf(true, false), audio.streamRequests)
+        // Redirection mode is a different mechanism and stays available after a backend switch.
+        assertEquals("muted: mode 2->5", mute.mute(true))
+        mute.restore("tap closed")
+        audio.mode = 2 // The fake leaves NORMAL after withdrawal; the next call starts in IN_CALL.
+        mute.beginCall()
+        assertNull(mute.streamMuteUnsupported)
+        assertFalse(mute.directMuteIncompatible)
+        assertEquals("muted: voice-call stream", mute.mute(false))
+    }
+
+    @Test fun lateCaptureFailureIsRecoveredButNotBlamedOnTheDevice() {
+        val audio = Audio()
+        var now = 0L
+        val mute = LocalOutputMute(audio) { now }
+        mute.mute(false)
+        now += LocalOutputMute.MUTE_FAILURE_WINDOW_MS + 1
+        assertNotNull(mute.withdrawForCaptureFailure("record read 0"))
+        assertFalse(mute.directMuteIncompatible)
+        assertTrue(mute.mute(false).startsWith("unsupported:"))
+    }
+
+    @Test fun captureFailureNeverTouchesAMuteWeDoNotOwn() {
+        val preserved = Audio().apply { voiceCallMuted = true }
+        val mute = LocalOutputMute(preserved)
+        mute.mute(false)
+        assertNull(mute.withdrawForCaptureFailure("record read 0"))
+        assertTrue(preserved.voiceCallMuted)
+        assertFalse(mute.directMuteIncompatible)
+
+        val redirected = Audio()
+        val modeMute = LocalOutputMute(redirected)
+        modeMute.mute(true)
+        assertNull(modeMute.withdrawForCaptureFailure("record read 0"))
+        assertEquals(5, redirected.mode)
+        assertNull(LocalOutputMute(Audio()).withdrawForCaptureFailure("record read 0"))
+    }
+
+    @Test fun failedWithdrawalKeepsRestorationPendingButStillRefusesMute() {
+        val audio = Audio()
+        val mute = LocalOutputMute(audio)
+        mute.mute(false)
+        audio.acceptUnmute = false
+        assertTrue(mute.withdrawForCaptureFailure("record read 0")!!.contains("restoration pending"))
+        assertTrue(mute.restorationPending)
+        assertTrue(mute.ownsOutputChange)
+        assertEquals("already muted: voice-call stream", mute.mute(false))
+        audio.acceptUnmute = true
+        assertEquals("restored voice-call stream (tap closed)", mute.restore("tap closed"))
+        assertTrue(mute.mute(false).startsWith("unsupported:"))
+    }
+
+    @Test fun deviceBlockRefusesStreamMuteFromTheStartOfTheCall() {
+        val audio = Audio()
+        val mute = LocalOutputMute(audio)
+        mute.beginCall("it previously stopped direct capture on this device")
+        assertEquals("unsupported: it previously stopped direct capture on this device", mute.mute(false))
+        assertTrue(mute.requested)
+        assertEquals(CallAudioStatus.UNSUPPORTED, mute.observedMute())
+        assertTrue(audio.streamRequests.isEmpty())
+        assertEquals("not muted", mute.restore("tap closed"))
+        assertEquals("muted: mode 2->5", mute.mute(true))
+    }
 }

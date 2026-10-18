@@ -18,6 +18,9 @@ class PrivilegedAudioOpener(
     private val format: () -> PcmFormat,
     private val createPort: (ParcelFileDescriptor, PcmFormat, (String) -> Unit) -> PcmSocketPort = ::PcmSocketPort,
     private val onStatusChanged: () -> Unit = {},
+    /** Per-device record that voice-call stream mute stops direct capture. */
+    private val directMuteBlocked: () -> Boolean = { false },
+    private val onDirectMuteIncompatible: () -> Unit = {},
 ) : CallAudioOpener {
     private val lock = Any()
     private var generation = 0L
@@ -53,6 +56,9 @@ class PrivilegedAudioOpener(
             current.restoreDetail.isEmpty() && current.voiceCallStreamMuted != false) {
             current = current.copy(restorationPending = true, restoreDetail = previous.restoreDetail,
                 backend = current.backend.ifEmpty { previous.backend })
+        }
+        if (current.directMuteIncompatible && !previous.directMuteIncompatible) {
+            runCatching { onDirectMuteIncompatible() }
         }
         publish(current)
     }
@@ -99,6 +105,8 @@ class PrivilegedAudioOpener(
         val selectedMethod = method()
         val suppressLocal = muteEarpiece()
         val ticket = ++generation
+        // Best effort: without it the helper still recovers in-call, after a short capture gap.
+        runCatching { svc.setDirectOutputMuteBlocked(suppressLocal && directMuteBlocked()) }
         val pfd = try { svc.openCallAudio(selectedMethod, pcm.sampleRate) } catch (e: Throwable) {
             refreshStatus()
             throw e
