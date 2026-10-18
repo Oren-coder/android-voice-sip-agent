@@ -7,10 +7,12 @@ import io.github.sparkcyf.voicesipagent.voice.LegState
 import io.github.sparkcyf.voicesipagent.voice.MediaPort
 import io.github.sparkcyf.voicesipagent.voice.redactNumber
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** One inbound leg tied to the outbound leg we created for it. */
 class BridgeSession internal constructor(
@@ -66,21 +68,26 @@ class CallBridge(
             continueExistingPeriodicTasksAfterShutdownPolicy = false
         }
     private val listeners = CopyOnWriteArrayList<BridgeListener>()
+    private val stopping = AtomicBoolean(false)
     private var nextId = 1
 
     @Volatile var session: BridgeSession? = null
         private set
 
     fun start() {
-        sideA.setIncomingCallHandler { leg -> post { onInbound(leg, sideA, sideB, routeAtoB) } }
-        sideB.setIncomingCallHandler { leg -> post { onInbound(leg, sideB, sideA, routeBtoA) } }
+        sideA.setIncomingCallHandler { leg -> postIncoming(leg) { onInbound(leg, sideA, sideB, routeAtoB) } }
+        sideB.setIncomingCallHandler { leg -> postIncoming(leg) { onInbound(leg, sideB, sideA, routeBtoA) } }
     }
 
     fun stop() {
+        if (!stopping.compareAndSet(false, true)) return
         sideA.setIncomingCallHandler(null)
         sideB.setIncomingCallHandler(null)
-        post { session?.let { endSession(it, HangupCause.NORMAL) } }
-        executor.shutdown()
+        post {
+            // A running task may still schedule timers. Shut down only after it and cleanup finish.
+            try { session?.let { endSession(it, HangupCause.NORMAL) } }
+            finally { executor.shutdown() }
+        }
     }
 
     fun addListener(l: BridgeListener) = listeners.addIfAbsent(l)
@@ -88,11 +95,10 @@ class CallBridge(
 
     /** Blocks until every task posted so far has run (tests). */
     internal fun drain() {
-        if (!executor.isShutdown) executor.submit {}.get()
+        try { executor.submit {}.get() } catch (_: RejectedExecutionException) {}
     }
 
-    private fun post(block: () -> Unit) {
-        if (executor.isShutdown) return
+    private fun post(block: () -> Unit): Boolean = try {
         executor.execute {
             try {
                 block()
@@ -100,6 +106,16 @@ class CallBridge(
                 log("bridge task failed: $t")
             }
         }
+        true
+    } catch (_: RejectedExecutionException) {
+        false
+    }
+
+    private fun postIncoming(leg: CallLeg, block: () -> Unit) {
+        // An endpoint may have captured this handler before stop removed it.
+        if (stopping.get() || !post {
+            if (stopping.get()) leg.hangup(HangupCause.UNAVAILABLE) else block()
+        }) leg.hangup(HangupCause.UNAVAILABLE)
     }
 
     private fun onInbound(leg: CallLeg, from: CallEndpoint, to: CallEndpoint, route: RouteTarget) {
@@ -143,11 +159,13 @@ class CallBridge(
     }
 
     private inner class LegWatcher(val s: BridgeSession, val inbound: Boolean) : CallLeg.Listener {
-        override fun onStateChanged(leg: CallLeg, state: LegState) = post { reevaluate(s); notifyChanged(s) }
-        override fun onMediaChanged(leg: CallLeg, media: MediaPort?) = post { reevaluate(s) }
-        override fun onDtmf(leg: CallLeg, digit: Char, durationMs: Int) = post {
-            val other = if (inbound) s.outbound else s.inbound
-            if (other?.state == LegState.CONNECTED) other.sendDtmf(digit, durationMs)
+        override fun onStateChanged(leg: CallLeg, state: LegState) { post { reevaluate(s); notifyChanged(s) } }
+        override fun onMediaChanged(leg: CallLeg, media: MediaPort?) { post { reevaluate(s) } }
+        override fun onDtmf(leg: CallLeg, digit: Char, durationMs: Int) {
+            post {
+                val other = if (inbound) s.outbound else s.inbound
+                if (other?.state == LegState.CONNECTED) other.sendDtmf(digit, durationMs)
+            }
         }
     }
 
