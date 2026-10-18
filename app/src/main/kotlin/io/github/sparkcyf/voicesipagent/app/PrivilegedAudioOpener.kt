@@ -9,6 +9,11 @@ import io.github.sparkcyf.voicesipagent.telephony.CallAudioOpener
 import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.util.concurrent.Executor
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Glue: the telephony layer's audio source, backed by the Shizuku shell service. */
 class PrivilegedAudioOpener(
@@ -21,6 +26,7 @@ class PrivilegedAudioOpener(
     /** Per-device record that voice-call stream mute stops direct capture. */
     private val directMuteBlocked: () -> Boolean = { false },
     private val onDirectMuteIncompatible: () -> Unit = {},
+    private val cleanupExecutor: Executor = audioCleanupExecutor,
 ) : CallAudioOpener {
     private val lock = Any()
     private var generation = 0L
@@ -142,20 +148,35 @@ class PrivilegedAudioOpener(
         }
         refreshStatus()
         object : CallAudioHandle {
-            private var closed = false
+            private val closed = AtomicBoolean()
             override val port = port
-            override fun close() = synchronized(lock) closeHandle@{
-                if (closed) return@closeHandle
-                closed = true
+            override fun close() {
+                if (!closed.compareAndSet(false, true)) return
+                // Telecom calls close on main. Never acquire the IPC lock here: an open/status
+                // transaction may already hold it while blocked in the helper or audio HAL.
                 try { port.close() } finally {
-                    if (ticket == generation) {
-                        runCatching { svc.closeCallAudio() }
-                        markClosed()
-                        refreshStatus()
+                    cleanupExecutor.execute {
+                        synchronized(lock) {
+                            // A newer open (or shutdown) may overtake this queued close. It owns
+                            // helper cleanup now; closing this socket must not close its tap.
+                            if (ticket != generation) return@synchronized
+                            runCatching { svc.closeCallAudio() }
+                            markClosed()
+                            refreshStatus()
+                            runCatching {
+                                AppLog.i("call audio tap closed: in=${port.framesIn} out=${port.framesOut} " +
+                                    runCatching { svc.audioStats() }.getOrDefault(""))
+                            }
+                        }
                     }
                 }
-                AppLog.i("call audio tap closed: in=${port.framesIn} out=${port.framesOut} ${runCatching { svc.audioStats() }.getOrDefault("")}")
             }
         }
+    }
+
+    companion object {
+        // Serialize remote closes without keeping a thread alive while the gateway is idle.
+        private val audioCleanupExecutor = ThreadPoolExecutor(0, 1, 1, TimeUnit.SECONDS,
+            LinkedBlockingQueue()) { task -> Thread(task, "audio-cleanup").apply { isDaemon = true } }
     }
 }

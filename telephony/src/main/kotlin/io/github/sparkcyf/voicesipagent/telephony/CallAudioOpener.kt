@@ -5,6 +5,7 @@ import io.github.sparkcyf.voicesipagent.voice.MediaPort
 /** An open cellular audio tap. */
 interface CallAudioHandle {
     val port: MediaPort
+    /** Called on main: release local media promptly and defer remote cleanup without waiting for IPC. */
     fun close()
 }
 

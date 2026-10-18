@@ -15,12 +15,18 @@ import org.junit.Before
 import org.junit.Test
 import org.mockito.MockedStatic
 import org.mockito.Mockito.*
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class PrivilegedAudioOpenerTest {
     private val connector = mock(ShizukuConnector::class.java)
     private val service = mock(IPrivilegedService::class.java)
     private val pfd = mock(ParcelFileDescriptor::class.java)
     private val port = mock(PcmSocketPort::class.java)
+    private val cleanupTasks = ArrayDeque<Runnable>()
+    private val queuedCleanup = Executor { cleanupTasks.addLast(it) }
     private lateinit var log: MockedStatic<Log>
 
     @Before fun setup() {
@@ -30,14 +36,18 @@ class PrivilegedAudioOpenerTest {
         doReturn("open").`when`(service).audioStats()
         report(CallAudioStatus())
     }
-    @After fun teardown() { log.close() }
+    @After fun teardown() { try { drainCleanup() } finally { log.close() } }
+
+    private fun drainCleanup() { while (cleanupTasks.isNotEmpty()) cleanupTasks.removeFirst().run() }
 
     private fun opener(mute: Boolean = false,
         directMuteBlocked: Boolean = false,
         onIncompatible: () -> Unit = {},
+        cleanup: Executor = queuedCleanup,
         factory: (ParcelFileDescriptor, PcmFormat, (String) -> Unit) -> PcmSocketPort = { _, _, _ -> port }) =
         PrivilegedAudioOpener(connector, { AudioMethod.AUTO }, { mute }, { PcmFormat.NARROWBAND }, factory,
-            directMuteBlocked = { directMuteBlocked }, onDirectMuteIncompatible = onIncompatible)
+            directMuteBlocked = { directMuteBlocked }, onDirectMuteIncompatible = onIncompatible,
+            cleanupExecutor = cleanup)
 
     private fun report(status: CallAudioStatus) {
         val bundle = mock(Bundle::class.java)
@@ -77,25 +87,46 @@ class PrivilegedAudioOpenerTest {
         assertSame(port, handle.port)
         handle.close()
         verify(port).close()
+        drainCleanup()
         verify(service).closeCallAudio()
     }
 
     @Test fun staleHandleCloseDoesNotCloseNewHelperTap() {
+        assertStaleCloseDoesNotAffectNewTap(closeBeforeReplacement = false)
+    }
+
+    @Test fun queuedCloseDoesNotCloseOrChangeStatusOfANewerTap() {
+        assertStaleCloseDoesNotAffectNewTap(closeBeforeReplacement = true)
+    }
+
+    private fun assertStaleCloseDoesNotAffectNewTap(closeBeforeReplacement: Boolean) {
         val nextPort = mock(PcmSocketPort::class.java)
         var calls = 0
         val opener = opener { _, _, _ -> if (calls++ == 0) port else nextPort }
         report(CallAudioStatus(active = true, backend = "direct"))
         val old = opener.open {}
+        if (closeBeforeReplacement) {
+            old.close()
+            verify(port).close()
+            verify(service, never()).closeCallAudio()
+        }
         report(CallAudioStatus(active = true, backend = "redirection-helper"))
         val next = opener.open {}
         val current = opener.status.value
-        old.close()
-        assertEquals(current, opener.status.value)
+        clearInvocations(service)
+
+        if (!closeBeforeReplacement) old.close()
         verify(port).close()
-        verify(service, never()).closeCallAudio()
+        verifyNoInteractions(service)
+        drainCleanup()
+        assertEquals(current, opener.status.value)
+        verifyNoInteractions(service)
+        verify(nextPort, never()).close()
+
         next.close()
         next.close()
         verify(nextPort).close()
+        drainCleanup()
         verify(service).closeCallAudio()
     }
 
@@ -105,6 +136,70 @@ class PrivilegedAudioOpenerTest {
         assertTrue(runCatching { handle.close() }.isFailure)
         handle.close()
         verify(port).close()
+        drainCleanup()
+        verify(service).closeCallAudio()
+    }
+
+    @Test fun closeReturnsWhileRemoteCleanupIsBlocked() {
+        val cleanup = Executors.newSingleThreadExecutor()
+        val caller = Executors.newSingleThreadExecutor()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        doAnswer {
+            entered.countDown()
+            check(release.await(10, TimeUnit.SECONDS)) { "test did not release cleanup" }
+            null
+        }.`when`(service).closeCallAudio()
+        try {
+            val handle = opener(cleanup = cleanup).open {}
+            caller.submit { handle.close() }.get(5, TimeUnit.SECONDS)
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            verify(port).close()
+            // Repeated closes must return even while the first remote close holds the IPC lock.
+            caller.submit { handle.close() }.get(5, TimeUnit.SECONDS)
+            verify(port).close()
+        } finally {
+            release.countDown()
+            cleanup.shutdown()
+            caller.shutdownNow()
+            assertTrue(cleanup.awaitTermination(5, TimeUnit.SECONDS))
+            assertTrue(caller.awaitTermination(5, TimeUnit.SECONDS))
+        }
+        verify(service).closeCallAudio()
+    }
+
+    @Test fun closeDoesNotWaitForAnInFlightStatusTransaction() {
+        val cleanup = Executors.newSingleThreadExecutor()
+        val polling = Executors.newSingleThreadExecutor()
+        val caller = Executors.newSingleThreadExecutor()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        try {
+            val opener = opener(cleanup = cleanup)
+            val handle = opener.open {}
+            doAnswer {
+                entered.countDown()
+                check(release.await(10, TimeUnit.SECONDS)) { "test did not release status" }
+                mock(Bundle::class.java)
+            }.`when`(service).callAudioStatus()
+            val poll = polling.submit { opener.refreshStatus() }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+            caller.submit { handle.close() }.get(5, TimeUnit.SECONDS)
+            verify(port).close()
+            verify(service, never()).closeCallAudio()
+
+            release.countDown()
+            poll.get(5, TimeUnit.SECONDS)
+        } finally {
+            release.countDown()
+            cleanup.shutdown()
+            polling.shutdownNow()
+            caller.shutdownNow()
+            assertTrue(cleanup.awaitTermination(5, TimeUnit.SECONDS))
+            assertTrue(polling.awaitTermination(5, TimeUnit.SECONDS))
+            assertTrue(caller.awaitTermination(5, TimeUnit.SECONDS))
+        }
         verify(service).closeCallAudio()
     }
 
@@ -182,6 +277,7 @@ class PrivilegedAudioOpenerTest {
         verify(service, never()).setLocalOutputMuted(false)
         report(pending.copy(active = false))
         handle.close()
+        drainCleanup()
         assertTrue(opener.status.value.restorationPending)
         doAnswer {
             report(CallAudioStatus(restoreDetail = "restored voice-call stream (requested)", voiceCallStreamMuted = false))

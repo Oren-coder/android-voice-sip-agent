@@ -106,6 +106,10 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   APK's `lastUpdateTime`, so every reinstall restarts the shell process and loads the new code.
   `openCallAudio(method, sampleRate)` uses 8 kHz for Kotlin SIP and 16 kHz for pjsua2, including loopback.
   There is no rate fallback; existing official/legacy method selection and same-rate setup retries remain.
+  App-side handle close shuts down the local socket immediately on the Telecom main thread. Helper close,
+  restoration reporting and final stats run on a serialized `audio-cleanup` worker whose thread expires
+  after one idle second; none waits on main for an in-flight open/status transaction. Queued cleanup checks
+  its generation before IPC so it cannot close a newer tap. Remote restoration can finish after hangup.
   Capture failures are recovered inside the tap, keeping the app's socket and the call (`TapRecovery`):
   a direct record read <= 0 with our voice-call stream mute applied withdraws that mute, refuses it for
   the rest of the call and re-creates the record once; any other direct read <= 0 gets one more re-create.
