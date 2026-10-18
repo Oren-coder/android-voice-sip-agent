@@ -17,6 +17,8 @@ via the phone, two-way audio, DTMF, Wi-Fi reconnect (also mid-call), handset mut
 switch, overnight Doze standby, 15-minute calls without clock drift, and pjsua2 calls both on a LAN (UDP) and
 through a public Flexisip proxy (TLS + SRTP). Not yet verified: call waiting, DTMF and network-loss recovery under
 pjsua2, public calls over cellular data only (Wi-Fi off).
+Community reports (README "Tested on") cover five more Android 13–16 phones, which give two-way audio only with
+`audio_method=2` (direct) and earpiece mute off; Shizuku 13.6.0 cannot start the UserService on MediaTek/Transsion (use 13.5.4).
 
 ## Common commands
 
@@ -35,11 +37,13 @@ adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 
 adb control (the receiver is guarded by the DUMP permission, so only the shell can send to it; **always write the
 fully-qualified component name** — `.AdbControlReceiver` resolves to a non-existent class and the broadcast is
-silently dropped):
+silently dropped). Every op replies after the `gateway-runtime` executor has processed it (≤5 s):
+`result=1` ok, `result=2` bad op/argument, `result=3` still queued; `data` is a one-line summary (status) or
+the effective settings (never the password). `result=0` with no data means the receiver was never reached:
 
 ```bash
 R=io.github.sparkcyf.voicesipagent/io.github.sparkcyf.voicesipagent.app.AdbControlReceiver
-adb shell am broadcast -n $R --es op status            # status goes to logcat (VoiceSipAgent)
+adb shell am broadcast -n $R --es op status            # one-line reply; full report goes to logcat (VoiceSipAgent)
 adb shell am broadcast -n $R --es op takeover --ez on false
 adb shell am broadcast -n $R --es op earpiece-mute --ez on true
 adb shell am broadcast -n $R --es op loopback --ez on true   # inbound echo test; in-memory only, reset on reinstall
@@ -47,6 +51,7 @@ adb shell am broadcast -n $R --es op provision --es user … --es password '…'
 adb shell am broadcast -n $R --es op setup | sip-restart
 adb shell am broadcast -n $R --es op sip-stack --es stack pjsua2|builtin
 adb shell am broadcast -n $R --es op provision --es transport tls --es srtp optional …   # transport/srtp: pjsua2 only
+adb shell am broadcast -n $R --es op provision --ei audio_method 2   # 0 auto, 1 redirection, 2 direct; --ei call_access 0|1|2
 adb shell am broadcast -n $R --es op sip-debug --ez on true   # pjsip info-level logging, off by default (persisted)
 adb shell "am broadcast -n $R --es op provision --es prefixes ''"   # empty string args need an extra layer of quotes, or am says "Argument expected"
 ```
