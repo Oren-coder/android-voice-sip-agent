@@ -109,7 +109,13 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   zero (peak 0) for the first 3 s. The AUTO order is the single constant `TapRecovery.AUTO_ORDER`
   (redirection first; direct-first is pending tests of direct on the Pixel and moto). A mute failure within
   3 s of the mute is remembered per build fingerprint by the app, which then blocks direct stream mute
-  (`setDirectOutputMuteBlocked`); changing the earpiece-mute setting clears it. None of this is device-verified.
+  (`setDirectOutputMuteBlocked`); changing the earpiece-mute setting clears it. The recovery paths themselves
+  are not device-verified. Pixel 11 Pro (Android 17, 2026-10-17): redirection-manual gives two-way audio;
+  direct gives two-way audio with earpiece mute off, but with the voice-call stream mute the direct downlink
+  capture is attenuated (peak <2k vs ~20k) without any read error, so `TapRecovery` does not trigger.
+  Diagnostics: the 5 s `levels` line adds per-window max frame gaps (`downGap5s`, `upGap5s`, `upWrite5s`) and
+  tap stats add totals (`GapStats`); pjsua2 logs `call N rtp rx[...] tx[...] jbuf[...] fromSip/toSip[...]`
+  every 5 s and a final line when the stream is still available. Counters only, never audio.
   The new 16 kHz tap has not yet been verified on a device.
 - **SIP (`:sip`)**: UDP; all protocol state runs on a single `sip-ua` scheduler thread (`post {}`). Outbound calls
   carry the caller number in `P-Asserted-Identity`; for inbound calls the cellular number to dial comes from the

@@ -78,6 +78,10 @@ internal class CallAudioTap(
     @Volatile var upVoiced = 0L; private set
     private var windowDown = 0
     private var windowUp = 0
+    /** Frame timing: downlink frame completions, uplink packet arrivals, uplink write blocking. */
+    private val downGap = GapStats()
+    private val upGap = GapStats()
+    private val upWrite = GapStats()
     @Volatile var error: String? = null; private set
 
     /** Opens the audio paths and returns the app's end of the socket pair. */
@@ -299,6 +303,7 @@ internal class CallAudioTap(
                 offset += n
                 if (offset < frameBytes) continue
                 offset = 0
+                downGap.mark(SystemClock.elapsedRealtimeNanos())
                 val p = peak(buf)
                 if (p > downPeak) downPeak = p
                 if (p > VOICE_THRESHOLD) downVoiced++
@@ -306,7 +311,9 @@ internal class CallAudioTap(
                 check(Os.write(local, buf, 0, frameBytes) == frameBytes) { "short downlink packet write" }
                 if (++downFrames % 250 == 0L) {
                     // Every 5 s: levels only, never audio content.
-                    Log.i(TAG, "levels t=${downFrames / 50}s downPeak5s=$windowDown upPeak5s=$windowUp up=$upFrames")
+                    Log.i(TAG, "levels t=${downFrames / 50}s downPeak5s=$windowDown upPeak5s=$windowUp up=$upFrames" +
+                        " downGap5s=${downGap.takeWindowMax()}ms upGap5s=${upGap.takeWindowMax()}ms" +
+                        " upWrite5s=${upWrite.takeWindowMax()}ms")
                     windowDown = 0
                     windowUp = 0
                 }
@@ -331,6 +338,8 @@ internal class CallAudioTap(
                 val n = Os.read(local, buf, 0, buf.size)
                 if (n <= 0) break // peer closed
                 check(n == frameBytes) { "uplink packet size $n, expected $frameBytes" }
+                val arrived = SystemClock.elapsedRealtimeNanos()
+                upGap.mark(arrived)
                 val p = peak(buf, n)
                 if (p > upPeak) upPeak = p
                 if (p > VOICE_THRESHOLD) upVoiced++
@@ -346,6 +355,7 @@ internal class CallAudioTap(
                     }
                     off += w
                 }
+                upWrite.record((SystemClock.elapsedRealtimeNanos() - arrived) / 1_000_000)
                 upFrames++
             }
         } catch (e: ErrnoException) {
@@ -448,6 +458,7 @@ internal class CallAudioTap(
         "downVoiced=$downVoiced upVoiced=$upVoiced" +
         " backendFailures=$backendFailures preferred=${if (::track.isInitialized) runCatching { track.preferredDevice?.type }.getOrNull() else null}" +
         " routed=${if (::track.isInitialized) runCatching { track.routedDevice?.type }.getOrNull() else null}" +
+        " downGap[$downGap] upGap[$upGap] upWrite[$upWrite]" +
         recoveryDetail.let { if (it.isEmpty()) "" else " recoveries=[$it]" } +
         (error?.let { " error=$it" } ?: "")
 
