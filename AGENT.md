@@ -97,6 +97,14 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   APK's `lastUpdateTime`, so every reinstall restarts the shell process and loads the new code.
   `openCallAudio(method, sampleRate)` uses 8 kHz for Kotlin SIP and 16 kHz for pjsua2, including loopback.
   There is no rate fallback; existing official/legacy method selection and same-rate setup retries remain.
+  Capture failures are recovered inside the tap, keeping the app's socket and the call (`TapRecovery`):
+  a direct record read <= 0 with our voice-call stream mute applied withdraws that mute, refuses it for
+  the rest of the call and re-creates the record once; any other direct read <= 0 gets one more re-create.
+  AUTO also switches mid-call to the next backend when redirection capture fails or its downlink is digital
+  zero (peak 0) for the first 3 s. The AUTO order is the single constant `TapRecovery.AUTO_ORDER`
+  (redirection first; direct-first is pending tests of direct on the Pixel and moto). A mute failure within
+  3 s of the mute is remembered per build fingerprint by the app, which then blocks direct stream mute
+  (`setDirectOutputMuteBlocked`); changing the earpiece-mute setting clears it. None of this is device-verified.
   The new 16 kHz tap has not yet been verified on a device.
 - **SIP (`:sip`)**: UDP; all protocol state runs on a single `sip-ua` scheduler thread (`post {}`). Outbound calls
   carry the caller number in `P-Asserted-Identity`; for inbound calls the cellular number to dial comes from the

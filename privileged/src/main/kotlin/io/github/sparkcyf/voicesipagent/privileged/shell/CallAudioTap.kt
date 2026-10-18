@@ -23,23 +23,44 @@ import java.io.FileDescriptor
 /**
  * Shell-side call audio tap: downlink capture -> socket, socket -> uplink injection.
  * PCM stays in memory; only counters are logged.
+ *
+ * Capture failures are recovered in place where [TapRecovery] allows it (direct record re-create,
+ * AUTO backend fallback), so the app's socket and the call survive them.
  */
 internal class CallAudioTap(
     private val ctx: Context,
     private val method: Int,
     sampleRate: Int,
-    /** Runs once when the tap shuts down, from whichever thread closed it. */
-    private val onClosed: () -> Unit,
+    private val hooks: Hooks,
 ) {
+    /** Called from tap threads without holding the tap monitor. */
+    interface Hooks {
+        /** Withdraw our direct-mode voice-call stream mute after a capture failure; true if we owned one. */
+        fun withdrawMuteForCaptureFailure(failure: String): Boolean
+        /** Restore owned output changes before the backend is replaced. */
+        fun beforeBackendSwitch()
+        /** Re-apply a requested output mute for the new backend. */
+        fun afterBackendSwitch(usedMethod: String)
+        /** Runs once when the tap shuts down, from whichever thread closed it. */
+        fun onClosed()
+    }
+
     private val pcm = PcmFormat(sampleRate)
     private val rate = pcm.sampleRate
     private val frameBytes = pcm.frameBytes
-    private lateinit var record: AudioRecord
-    private lateinit var track: AudioTrack
+    // Replaced by recoveries: the record only on the capture thread, the track while [switching].
+    @Volatile private lateinit var record: AudioRecord
+    @Volatile private lateinit var track: AudioTrack
     private lateinit var local: FileDescriptor
+    private lateinit var recovery: TapRecovery
     @Volatile private var running = false
+    @Volatile private var switching = false
     val isOpen: Boolean get() = running
     private var closed = false
+    private var backendFrames = 0L
+    private var backendPeak = 0
+    private val recoveries = ArrayList<String>()
+    val recoveryDetail: String get() = synchronized(recoveries) { recoveries.joinToString("; ") }
     private var downThread: Thread? = null
     private var upThread: Thread? = null
     private var modeThread: Thread? = null
@@ -71,14 +92,8 @@ internal class CallAudioTap(
             result = pfd
             Os.close(app)
             running = true
-            record.startRecording()
-            check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "record did not start at $rate Hz" }
-            // Two frames of silence absorb scheduling jitter between the app and the track.
-            check(track.write(ByteArray(frameBytes * 2), 0, frameBytes * 2, AudioTrack.WRITE_NON_BLOCKING) >= 0) {
-                "track prefill failed at $rate Hz"
-            }
-            track.play()
-            check(track.playState == AudioTrack.PLAYSTATE_PLAYING) { "track did not start at $rate Hz" }
+            startRecord()
+            startTrack()
             downThread = Thread(::downLoop, "tap-down").apply { priority = Thread.MAX_PRIORITY; start() }
             upThread = Thread(::upLoop, "tap-up").apply { priority = Thread.MAX_PRIORITY; start() }
             modeThread = Thread({
@@ -103,31 +118,57 @@ internal class CallAudioTap(
 
     private fun openAudio() {
         require(method in AudioMethod.AUTO..AudioMethod.LEGACY) { "unknown audio method $method" }
+        recovery = TapRecovery(method)
         check(isCellularMode(audioManager.mode)) { "not in a cellular call: audio mode=${audioManager.mode}" }
-        val capabilities = AudioCapabilities.inspect(ctx)
         val failures = ArrayList<String>()
-        if (method == AudioMethod.AUTO || method == AudioMethod.OFFICIAL) {
-            // Use the framework helpers when process attribution matches the helper identity;
-            // otherwise construct equivalent objects with the explicit attributed context.
+        for (backend in recovery.plan) {
             try {
-                check(capabilities.redirect) { capabilities.detail }
-                openRedirected()
+                openBackend(backend)
+                recovery.opened(backend)
+                if (failures.isNotEmpty()) backendFailures = failures.joinToString("; ")
                 return
             } catch (t: Throwable) {
-                failures += "official: ${describe(t)}"
+                failures += "${label(backend)}: ${describe(t)}"
                 releaseAudio()
-                if (method == AudioMethod.OFFICIAL) throw IllegalStateException(failures.joinToString("; "))
             }
         }
-        try {
-            check(capabilities.direct) { capabilities.detail }
-            openLegacy()
-            usedMethod = "direct"
-            backendFailures = failures.joinToString("; ")
-        } catch (t: Throwable) {
-            failures += "legacy: ${describe(t)}"
-            throw IllegalStateException(failures.joinToString("; "))
+        throw IllegalStateException(failures.joinToString("; "))
+    }
+
+    private fun openBackend(backend: TapBackend) {
+        val capabilities = AudioCapabilities.inspect(ctx)
+        when (backend) {
+            TapBackend.REDIRECTION -> {
+                // Use the framework helpers when process attribution matches the helper identity;
+                // otherwise construct equivalent objects with the explicit attributed context.
+                check(capabilities.redirect) { capabilities.detail }
+                openRedirected()
+            }
+            TapBackend.DIRECT -> {
+                check(capabilities.direct) { capabilities.detail }
+                openLegacy()
+                usedMethod = "direct"
+            }
         }
+    }
+
+    private fun label(backend: TapBackend) = when (backend) {
+        TapBackend.REDIRECTION -> "official"
+        TapBackend.DIRECT -> "legacy"
+    }
+
+    private fun startRecord() {
+        record.startRecording()
+        check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "record did not start at $rate Hz" }
+    }
+
+    private fun startTrack() {
+        // Two frames of silence absorb scheduling jitter between the app and the track.
+        check(track.write(ByteArray(frameBytes * 2), 0, frameBytes * 2, AudioTrack.WRITE_NON_BLOCKING) >= 0) {
+            "track prefill failed at $rate Hz"
+        }
+        track.play()
+        check(track.playState == AudioTrack.PLAYSTATE_PLAYING) { "track did not start at $rate Hz" }
     }
 
     // AudioCapabilities checks the helper UID's grants before either backend opens. Lint only
@@ -190,13 +231,8 @@ internal class CallAudioTap(
     /** AirSIM-style fallback for devices without the official interception API. */
     @SuppressLint("MissingPermission")
     private fun openLegacy() {
-        val minRec = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        check(minRec > 0) { "record buffer size $minRec at $rate Hz" }
-        record = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_DOWNLINK)
-            .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(minRec, frameBytes * 10))
-            .also(::setContext).build()
+        record = createLegacyRecord()
         try {
-            check(record.state == AudioRecord.STATE_INITIALIZED) { "VOICE_DOWNLINK record not initialized at $rate Hz" }
             val minTrack = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             check(minTrack > 0) { "track buffer size $minTrack at $rate Hz" }
             track = AudioTrack.Builder()
@@ -220,6 +256,20 @@ internal class CallAudioTap(
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private fun createLegacyRecord(): AudioRecord {
+        val minRec = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        check(minRec > 0) { "record buffer size $minRec at $rate Hz" }
+        val created = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_DOWNLINK)
+            .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(minRec, frameBytes * 10))
+            .also(::setContext).build()
+        if (created.state != AudioRecord.STATE_INITIALIZED) {
+            created.release()
+            error("VOICE_DOWNLINK record not initialized at $rate Hz")
+        }
+        return created
+    }
+
     private fun setContext(builder: Any) {
         AudioBuilderContext.apply(builder, ctx, Context::class.java) {
             ShellEnv.prepareAudioAttribution(ctx)
@@ -240,7 +290,12 @@ internal class CallAudioTap(
             var offset = 0
             while (running) {
                 val n = record.read(buf, offset, frameBytes - offset, AudioRecord.READ_BLOCKING)
-                if (n <= 0) { error = "record read $n at $rate Hz"; break }
+                if (n <= 0) {
+                    if (!running) break
+                    offset = 0
+                    if (recoverCapture("record read $n at $rate Hz")) continue
+                    break
+                }
                 offset += n
                 if (offset < frameBytes) continue
                 offset = 0
@@ -255,6 +310,10 @@ internal class CallAudioTap(
                     windowDown = 0
                     windowUp = 0
                 }
+                backendFrames++
+                if (p > backendPeak) backendPeak = p
+                val action = recovery.onDownlinkFrames(backendFrames, backendPeak)
+                if (action != null && !perform(action, "downlink digital zero for ${backendFrames / 50}s")) break
             }
         } catch (e: ErrnoException) {
             if (running && e.errno != OsConstants.EPIPE && e.errno != OsConstants.ECONNRESET) error = "down: ${e.message}"
@@ -278,8 +337,13 @@ internal class CallAudioTap(
                 if (p > windowUp) windowUp = p
                 var off = 0
                 while (off < n && running) {
-                    val w = track.write(buf, off, n - off, AudioTrack.WRITE_BLOCKING)
-                    if (w <= 0) { error = "track write $w at $rate Hz"; running = false; break }
+                    val t = track
+                    val w = t.write(buf, off, n - off, AudioTrack.WRITE_BLOCKING)
+                    if (w <= 0) {
+                        // The capture thread is replacing the backend: drop the rest of this frame.
+                        if (switching || t !== track) break
+                        error = "track write $w at $rate Hz"; running = false; break
+                    }
                     off += w
                 }
                 upFrames++
@@ -291,6 +355,75 @@ internal class CallAudioTap(
         } finally {
             close()
         }
+    }
+
+    /** Runs on the capture thread. Returns true when capture continues. */
+    private fun recoverCapture(failure: String): Boolean {
+        val withdrawn = recovery.backend == TapBackend.DIRECT &&
+            runCatching { hooks.withdrawMuteForCaptureFailure(failure) }.getOrDefault(false)
+        val why = if (withdrawn) "$failure with voice-call stream muted" else failure
+        return perform(recovery.onCaptureFailure(withdrawn), why)
+    }
+
+    private fun perform(action: TapRecovery.Action, why: String): Boolean = when (action) {
+        TapRecovery.Action.Close -> { error = why; false }
+        TapRecovery.Action.RecreateRecord -> recreateRecord(why)
+        is TapRecovery.Action.Switch -> switchBackend(action.backend, why)
+    }
+
+    private fun recreateRecord(why: String): Boolean {
+        SystemClock.sleep(RECOVERY_SETTLE_MS)
+        val ok = synchronized(this) {
+            if (closed) return false
+            try {
+                runCatching { record.stop() }
+                runCatching { record.release() }
+                record = createLegacyRecord()
+                startRecord()
+                true
+            } catch (t: Throwable) {
+                error = "$why; record re-create failed: ${describe(t)}"
+                false
+            }
+        }
+        if (ok) note("re-created direct record after $why")
+        return ok
+    }
+
+    private fun switchBackend(target: TapBackend, why: String): Boolean {
+        runCatching { hooks.beforeBackendSwitch() }.onFailure { Log.w(TAG, "output restore before switch failed: $it") }
+        val from = usedMethod
+        val ok = synchronized(this) {
+            if (closed) return false
+            switching = true
+            try {
+                runCatching { record.stop() }
+                runCatching { track.pause(); track.flush(); track.stop() }
+                releaseAudio()
+                check(isCellularMode(audioManager.mode)) { "not in a cellular call: audio mode=${audioManager.mode}" }
+                openBackend(target)
+                recovery.opened(target)
+                startRecord()
+                startTrack()
+                backendFrames = 0
+                backendPeak = 0
+                true
+            } catch (t: Throwable) {
+                error = "$why; switch to ${label(target)} failed: ${describe(t)}"
+                false
+            } finally {
+                switching = false
+            }
+        }
+        if (!ok) return false
+        note("switched $from -> $usedMethod after $why")
+        runCatching { hooks.afterBackendSwitch(usedMethod) }.onFailure { Log.w(TAG, "output mute after switch failed: $it") }
+        return true
+    }
+
+    private fun note(event: String) {
+        synchronized(recoveries) { recoveries += event }
+        Log.w(TAG, "recovery: $event")
     }
 
     @Synchronized
@@ -308,13 +441,14 @@ internal class CallAudioTap(
         upThread = null
         modeThread = null
         Log.i(TAG, "tap closed ${stats()}")
-        runCatching(onClosed).onFailure { Log.w(TAG, "onClosed failed: $it") }
+        runCatching(hooks::onClosed).onFailure { Log.w(TAG, "onClosed failed: $it") }
     }
 
     fun stats() = "method=$usedMethod rate=$rate frameBytes=$frameBytes down=$downFrames up=$upFrames downPeak=$downPeak upPeak=$upPeak " +
         "downVoiced=$downVoiced upVoiced=$upVoiced" +
         " backendFailures=$backendFailures preferred=${if (::track.isInitialized) runCatching { track.preferredDevice?.type }.getOrNull() else null}" +
         " routed=${if (::track.isInitialized) runCatching { track.routedDevice?.type }.getOrNull() else null}" +
+        recoveryDetail.let { if (it.isEmpty()) "" else " recoveries=[$it]" } +
         (error?.let { " error=$it" } ?: "")
 
     private fun peak(b: ByteArray, size: Int = b.size): Int {
@@ -340,6 +474,8 @@ internal class CallAudioTap(
     companion object {
         private const val TAG = "VsaTap"
         private const val VOICE_THRESHOLD = 300
+        /** Lets AudioService apply an unmute before the record is rebuilt. */
+        private const val RECOVERY_SETTLE_MS = 200L
         /** Hidden AudioAttributes.USAGE_CALL_ASSISTANT, as used by getCallUplinkInjectionAudioTrack. */
         private const val USAGE_CALL_ASSISTANT = 17
     }

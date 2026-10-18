@@ -4,7 +4,11 @@ import android.media.AudioManager
 import io.github.sparkcyf.voicesipagent.privileged.CallAudioStatus
 
 /** Owns only our output-mute changes. The caller serializes access and ties restoration to the tap. */
-internal class LocalOutputMute(private val audio: AudioControl) {
+internal class LocalOutputMute(
+    private val audio: AudioControl,
+    /** Monotonic milliseconds. */
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+) {
     interface AudioControl {
         val mode: Int
         val voiceCallMuted: Boolean
@@ -22,10 +26,16 @@ internal class LocalOutputMute(private val audio: AudioControl) {
     var lastRestoreResult = ""; private set
     var restorationPending = false; private set
     private var requestState = CallAudioStatus.NOT_REQUESTED
+    private var streamMutedAt = 0L
+    /** Why voice-call stream mute is refused for the rest of this call, if it is. */
+    var streamMuteUnsupported: String? = null; private set
+    /** Direct capture failed right after our stream mute: likely a device trait, not a call glitch. */
+    var directMuteIncompatible = false; private set
     val ownsOutputChange: Boolean
         get() = method == Method.REDIRECT_MODE || method == Method.VOICE_CALL_STREAM
 
-    fun beginCall() {
+    /** [streamMuteBlocked]: refuse voice-call stream mute for this call (known incompatible device). */
+    fun beginCall(streamMuteBlocked: String? = null) {
         check(!ownsOutputChange) { "Local playback restoration is still pending" }
         method = null
         requested = false
@@ -33,6 +43,8 @@ internal class LocalOutputMute(private val audio: AudioControl) {
         lastRestoreResult = ""
         restorationPending = false
         requestState = CallAudioStatus.NOT_REQUESTED
+        streamMuteUnsupported = streamMuteBlocked
+        directMuteIncompatible = false
     }
 
     fun observedMute(): String = try {
@@ -60,6 +72,10 @@ internal class LocalOutputMute(private val audio: AudioControl) {
             return@reportFailure if (stillMuted) "already muted: ${description(it)}"
                 else "failed: ${description(it)} no longer muted; restoration pending"
         }
+        if (!useRedirectMode) streamMuteUnsupported?.let {
+            requestState = CallAudioStatus.UNSUPPORTED
+            return@reportFailure "unsupported: $it"
+        }
         val before = audio.mode
         if (before != AudioManager.MODE_IN_CALL) {
             requestState = CallAudioStatus.NOT_APPLIED
@@ -77,6 +93,7 @@ internal class LocalOutputMute(private val audio: AudioControl) {
             "already muted: voice-call stream (preserved)"
         } else {
             method = Method.VOICE_CALL_STREAM
+            streamMutedAt = clock()
             audio.requestVoiceCallMute(true)
             if (audio.awaitVoiceCallMute(true)) "muted: voice-call stream"
             else "failed: voice-call stream mute not applied; restoration pending"
@@ -123,6 +140,21 @@ internal class LocalOutputMute(private val audio: AudioControl) {
         }
     }
 
+    /**
+     * Direct capture stopped while our voice-call stream mute was in place. Withdraws that mute and
+     * refuses it for the rest of the call. Returns the restore result, or null if we own no stream
+     * mute (a preserved user mute is never touched).
+     */
+    fun withdrawForCaptureFailure(failure: String): String? {
+        if (method != Method.VOICE_CALL_STREAM) return null
+        if (clock() - streamMutedAt <= MUTE_FAILURE_WINDOW_MS) directMuteIncompatible = true
+        val reason = "voice-call stream mute stopped direct capture ($failure)"
+        streamMuteUnsupported = reason
+        requestState = CallAudioStatus.UNSUPPORTED
+        lastMuteResult = "unsupported: $reason"
+        return restore("direct capture failed")
+    }
+
     private inline fun reportFailure(action: String, block: () -> String): String = try {
         block()
     } catch (e: Exception) {
@@ -140,5 +172,7 @@ internal class LocalOutputMute(private val audio: AudioControl) {
     companion object {
         /** AudioManager.MODE_CALL_REDIRECT (API 33, system API). */
         const val MODE_CALL_REDIRECT = 5
+        /** Capture failures this soon after our stream mute are attributed to the mute. */
+        const val MUTE_FAILURE_WINDOW_MS = 3_000L
     }
 }

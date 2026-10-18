@@ -57,4 +57,10 @@ interface IPrivilegedService {
 
     /** Structured current/last tap and output restoration state. See CallAudioStatus. */
     Bundle callAudioStatus() = 12;
+
+    /**
+     * Refuse voice-call stream mute on direct taps from the next openCallAudio(), because it
+     * previously stopped direct capture on this device. Kept for the helper process lifetime.
+     */
+    void setDirectOutputMuteBlocked(boolean blocked) = 13;
 }

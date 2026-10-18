@@ -13,6 +13,10 @@ data class CallAudioStatus(
     val restorationPending: Boolean = false,
     val restoreDetail: String = "",
     val voiceCallStreamMuted: Boolean? = null,
+    /** Direct capture failed right after voice-call stream mute; the app may remember this per device. */
+    val directMuteIncompatible: Boolean = false,
+    /** In-call recoveries (record re-creates, backend fallbacks); empty when none happened. */
+    val recoveryDetail: String = "",
     /** App-local query availability, deliberately excluded from the Binder payload. */
     val available: Boolean = true,
 ) {
@@ -32,6 +36,8 @@ data class CallAudioStatus(
         putBoolean("restoration_pending", restorationPending)
         putString("restore_detail", restoreDetail)
         voiceCallStreamMuted?.let { putBoolean("voice_call_stream_muted", it) }
+        putBoolean("direct_mute_incompatible", directMuteIncompatible)
+        putString("recovery_detail", recoveryDetail)
     }
 
     companion object {
@@ -39,6 +45,8 @@ data class CallAudioStatus(
         const val APPLIED = "applied"
         const val PRESERVED = "preserved"
         const val NOT_APPLIED = "not_applied"
+        /** Refused for this call: the method broke call audio capture on this device. */
+        const val UNSUPPORTED = "unsupported"
         const val UNKNOWN = "unknown"
 
         fun fromBundle(bundle: Bundle) = CallAudioStatus(
@@ -52,6 +60,8 @@ data class CallAudioStatus(
             restoreDetail = bundle.getString("restore_detail").orEmpty(),
             voiceCallStreamMuted = if (bundle.containsKey("voice_call_stream_muted"))
                 bundle.getBoolean("voice_call_stream_muted") else null,
+            directMuteIncompatible = bundle.getBoolean("direct_mute_incompatible"),
+            recoveryDetail = bundle.getString("recovery_detail").orEmpty(),
         )
     }
 }
