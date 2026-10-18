@@ -113,16 +113,28 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
             log.append(name).append('=').append(if (r.exit == 0) "ok" else "fail(${r.exit}: ${r.out.trim().take(120)})").append('\n')
         }
         val companion = Build.VERSION.SDK_INT >= 31 && callAccess != CallAccess.DIALER
-        if (companion && !appOpAllowed(packageName)) step("appops", "appops", "set", packageName, "MANAGE_ONGOING_CALLS", "allow")
+        // Reuse observations only until setup attempts to change the corresponding setting.
+        var ongoingCallsAllowed: Boolean? = if (companion) appOpAllowed(packageName) else null
+        if (ongoingCallsAllowed == false) {
+            step("appops", "appops", "set", packageName, "MANAGE_ONGOING_CALLS", "allow")
+            ongoingCallsAllowed = null
+        }
         // The override is lost on every reboot and Telecom restart, so it is re-checked each time. Telecom
         // keeps it as a plain list: adding appends a duplicate and removing drops one entry.
         val entries = if (Build.VERSION.SDK_INT >= 31) companionOverrideCount(packageName) else 0
+        var hasCompanionOverride: Boolean? = entries > 0
         if (companion && takeover && entries == 0) {
             step("companion", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "1")
+            hasCompanionOverride = null
         } else if (!takeover || !companion) {
             repeat(entries) { step("companion-remove", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "0") }
+            if (entries > 0) hasCompanionOverride = null
         }
-        if (!dozeAllowlisted(packageName)) step("deviceidle", "cmd", "deviceidle", "whitelist", "+$packageName")
+        var dozeAllowed: Boolean? = dozeAllowlisted(packageName)
+        if (dozeAllowed == false) {
+            step("deviceidle", "cmd", "deviceidle", "whitelist", "+$packageName")
+            dozeAllowed = null
+        }
         // The runtime passes effective takeover, keeping grants enabled until deferred shutdown ends.
         if (takeover) {
             for (perm in PHONE_RUNTIME_PERMISSIONS) {
@@ -141,16 +153,26 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
             }
         }
         Log.i(TAG, "setup:\n$log")
-        return health(packageName).apply { putString("setup_log", log.toString()) }
+        return readHealth(packageName, ongoingCallsAllowed, hasCompanionOverride, dozeAllowed)
+            .apply { putString("setup_log", log.toString()) }
     }
 
     override fun health(packageName: String): Bundle {
         enforceCaller(packageName)
+        return readHealth(packageName)
+    }
+
+    private fun readHealth(
+        packageName: String,
+        ongoingCallsAllowed: Boolean? = null,
+        hasCompanionOverride: Boolean? = null,
+        dozeAllowed: Boolean? = null,
+    ): Bundle {
         val b = Bundle()
         b.putInt(HealthKeys.UID, Process.myUid())
-        b.putBoolean(HealthKeys.MANAGE_ONGOING_CALLS, Build.VERSION.SDK_INT >= 31 && appOpAllowed(packageName))
-        b.putBoolean(HealthKeys.COMPANION_OVERRIDE, Build.VERSION.SDK_INT >= 31 && companionOverridden(packageName))
-        b.putBoolean(HealthKeys.DOZE_ALLOWLISTED, dozeAllowlisted(packageName))
+        b.putBoolean(HealthKeys.MANAGE_ONGOING_CALLS, Build.VERSION.SDK_INT >= 31 && (ongoingCallsAllowed ?: appOpAllowed(packageName)))
+        b.putBoolean(HealthKeys.COMPANION_OVERRIDE, Build.VERSION.SDK_INT >= 31 && (hasCompanionOverride ?: companionOverridden(packageName)))
+        b.putBoolean(HealthKeys.DOZE_ALLOWLISTED, dozeAllowed ?: dozeAllowlisted(packageName))
         val icp = ShellEnv.isPstnCallAudioInterceptable()
         b.putBoolean(HealthKeys.INTERCEPTABLE, icp == true)
         b.putString(HealthKeys.DETAIL, if (icp == null) "isPstnCallAudioInterceptable unavailable" else "")
