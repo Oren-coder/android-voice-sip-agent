@@ -453,13 +453,20 @@ class GatewayRuntime private constructor(context: Context) {
         val problem = when {
             h.dialerChangeRunning -> "Changing the default dialer"
             !gatewayEnabled -> "Gateway service not running"
+            // Without Shizuku, privileged call-access health is unknown; report the root cause.
+            h.shizuku != ShizukuConnector.State.CONNECTED -> shizukuProblem(h.shizuku)
             !access -> requirements.problem!!
-            h.shizuku != ShizukuConnector.State.CONNECTED -> "Shizuku not connected"
             !audio -> "Selected call audio unavailable: ${h.privilegedDetail}"
             else -> null
         }
         return CellularCheck(access, audio, requirements.problem, problem)
     }
+
+    // A restarted Shizuku server may not push its binder to this running app until an activity
+    // comes to the foreground (see AGENT.md), so tell the user how to reconnect.
+    private fun shizukuProblem(state: ShizukuConnector.State) =
+        if (state == ShizukuConnector.State.SHIZUKU_NOT_RUNNING) "Shizuku not running. After starting it, open this app to reconnect"
+        else "Shizuku not connected"
 
     private fun updateReadiness() {
         val c = checkCellular()
@@ -474,8 +481,8 @@ class GatewayRuntime private constructor(context: Context) {
                 "Waiting to become the default dialer" else "Waiting to restore the previous dialer"
             !h.takeover -> if (h.holdsDialer) "Gateway off; this app still holds the dialer role" else "Gateway off"
             !gatewayEnabled -> "Gateway service not running"
+            h.shizuku != ShizukuConnector.State.CONNECTED -> shizukuProblem(h.shizuku)
             !access -> c.accessProblem!!
-            h.shizuku != ShizukuConnector.State.CONNECTED -> "Shizuku not connected"
             !audio -> "Selected call audio unavailable: ${h.privilegedDetail}"
             !h.loopbackTest && !h.sip.ready -> "SIP unavailable: ${h.sip.detail}"
             else -> "Gateway ready"

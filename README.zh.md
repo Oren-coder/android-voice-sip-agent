@@ -147,6 +147,9 @@ adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
   （`LoadedApk.makeApplicationInner` 中的 `NullPointerException`；
   [RikkaApps/Shizuku#2048](https://github.com/RikkaApps/Shizuku/issues/2048)、
   [#1198](https://github.com/RikkaApps/Shizuku/issues/1198)）。请改装 Shizuku 13.5.4。
+- **重启 Shizuku 后请打开一次 App**（或点一下网关通知）。重启后的 Shizuku 服务可能不会把连接交给已在运行的 App
+  （在 Android 17 + Shizuku 13.6.0 上观察到），App 回到前台时才会交付。在此之前网关显示 *Shizuku not running*，
+  并默认保持未注册。adb 方式：`adb shell monkey -p io.github.sparkcyf.voicesipagent -c android.intent.category.LAUNCHER 1`。
 - **厂商设置**：小米、POCO、Redmi 需要登录小米账号才能开启 USB 安装和 USB 调试（安全设置），HyperOS 还可能拒绝
   `pm grant`。Infinix 和 Redmi 可能禁止 `adb install`，可把 APK 拷到手机上用文件管理器安装。三星需关闭
   **Auto Blocker**。请关闭系统自动更新：系统更新可能破坏网关依赖的隐藏 API。

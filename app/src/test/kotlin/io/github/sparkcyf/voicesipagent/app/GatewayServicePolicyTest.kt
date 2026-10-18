@@ -3,7 +3,9 @@ package io.github.sparkcyf.voicesipagent.app
 import android.content.Context
 import android.content.Intent
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
+import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 import io.github.sparkcyf.voicesipagent.telephony.CallSnapshot
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -34,6 +36,15 @@ class GatewayServicePolicyTest {
         assertFalse(lost.copy(calls = CallSnapshot(count = 1, owned = 0)).needsForegroundService)
         assertFalse(lost.copy(calls = CallSnapshot()).needsForegroundService)
         assertTrue(lost.copy(calls = CallSnapshot(), session = "SIP call finishing").needsForegroundService)
+    }
+
+    @Test fun notificationTellsUserToTapAfterRestartingShizuku() {
+        val down = HealthState(takeover = true, shizuku = ShizukuConnector.State.SHIZUKU_NOT_RUNNING)
+        assertEquals("Shizuku is not running. Start Shizuku, then tap here to reconnect.", GatewayService.summary(down))
+        val binding = down.copy(shizuku = ShizukuConnector.State.BINDING)
+        assertEquals("Setup needed · Shizuku binding", GatewayService.summary(binding))
+        assertEquals("Call takeover off", GatewayService.summary(down.copy(takeover = false)))
+        assertEquals("In call · s", GatewayService.summary(down.copy(session = "s")))
     }
 
     @Test fun switchAndRoleChangesRequestServiceStopAndRestart() {

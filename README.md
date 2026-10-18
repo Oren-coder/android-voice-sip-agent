@@ -161,6 +161,10 @@ Phone numbers are logged with only their last two digits; call audio is never lo
   starts (`NullPointerException` in `LoadedApk.makeApplicationInner`;
   [RikkaApps/Shizuku#2048](https://github.com/RikkaApps/Shizuku/issues/2048),
   [#1198](https://github.com/RikkaApps/Shizuku/issues/1198)). Install Shizuku 13.5.4 instead.
+- **After restarting Shizuku, open the app once** (or tap the gateway notification). A restarted Shizuku server
+  may not hand its connection to an app that is already running (seen with Shizuku 13.6.0 on Android 17); it does
+  so when the app comes to the foreground. Until then the gateway reports *Shizuku not running* and, by default,
+  stays unregistered. Over adb: `adb shell monkey -p io.github.sparkcyf.voicesipagent -c android.intent.category.LAUNCHER 1`.
 - **Vendor setup:** Xiaomi, POCO and Redmi need a signed-in Mi account before USB installation and USB debugging
   (security settings) can be enabled, and HyperOS may refuse `pm grant`. Infinix and Redmi may block
   `adb install`; copy the APK to the phone and install it from the file manager. On Samsung, turn off
