@@ -21,7 +21,7 @@ hidden platform APIs, which is also why the app is distributed through GitHub Re
 > [Disclaimer](#disclaimer) before using it.
 
 > [!IMPORTANT]
-> **AI SLOP WARNING:** This app is almost fully LLM-generated. The repo owners do not claim to understand the code here.
+> This code logic of this app is mostly written by LLM Agent. The repo owners may not claim to understand some of the code here.
 
 ## Status
 
