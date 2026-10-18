@@ -54,6 +54,7 @@ import io.github.sparkcyf.voicesipagent.pjsua2.SrtpPolicy
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
 import io.github.sparkcyf.voicesipagent.privileged.AudioMethod
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
+import io.github.sparkcyf.voicesipagent.privileged.CallAudioStatus
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 
 class MainActivity : DialerRoleActivity() {
@@ -77,6 +78,7 @@ class MainActivity : DialerRoleActivity() {
 private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit,
     chooseDialer: () -> Unit, cancelDialer: () -> Unit, setTakeover: (Boolean) -> Unit, roleMessage: String) {
     val h by rt.health.collectAsState()
+    val callAudio by rt.callAudioStatus.collectAsState()
     val pendingSettings by rt.pendingSettingsFlow.collectAsState()
     val log by AppLog.tail.collectAsState()
     Column(
@@ -130,7 +132,7 @@ private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modif
                 val unavailable = h.privileged != null &&
                     (h.privileged?.get(HealthKeys.LOCAL_SUPPRESSION) != true || !h.audioReady)
                 if (cur.muteEarpiece && unavailable)
-                    "Muting is unavailable with the current setup. The phone microphone remains muted during gateway calls."
+                    "Playback muting cannot be attempted with the current setup. The phone microphone remains muted during gateway calls. Changes apply to the next call."
                 else
                     "When enabled, attempts to silence the earpiece or speaker. The phone microphone remains muted during gateway calls. Changes apply to the next call."
             }
@@ -169,6 +171,34 @@ private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modif
         Section("Call") {
             Text(h.calls.summary)
             Text(h.session ?: "No active session")
+            if (callAudio.active) {
+                Text("Current audio method: ${if (callAudio.available) callAudio.backendLabel else "status unavailable"}")
+                Text("Local playback (Android): " + when {
+                    !callAudio.available -> "mute state unavailable"
+                    !callAudio.muteRequested -> "muting not requested"
+                    callAudio.outputMute == CallAudioStatus.APPLIED -> "mute request applied"
+                    callAudio.outputMute == CallAudioStatus.PRESERVED -> "existing mute preserved"
+                    callAudio.outputMute == CallAudioStatus.NOT_APPLIED -> "mute request not applied"
+                    else -> "mute state unknown"
+                })
+                Text("Next call: playback muting ${if (cur.muteEarpiece) "requested" else "off"}.",
+                    style = MaterialTheme.typography.bodySmall)
+            } else if (h.calls.owned > 0 || h.session != null) {
+                Text("Call audio is not open.")
+            }
+            if (callAudio.restorationPending) {
+                Text("Local call playback restoration is unconfirmed. Sound may remain muted.",
+                    color = MaterialTheme.colorScheme.error)
+                if (callAudio.ownsOutputChange && h.shizuku == ShizukuConnector.State.CONNECTED) {
+                    OutlinedButton(onClick = { rt.retryAudioRestoration() },
+                        enabled = !callAudio.active && h.calls.count == 0 && h.session == null) {
+                        Text("Retry restoring playback")
+                    }
+                } else {
+                    Text("If call sound stays muted, raise the call volume during a normal phone call.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            }
             Toggle("Echo incoming calls (test)", h.loopbackTest, { rt.setLoopbackTest(it) }) {
                 "While the gateway is on, answers incoming cellular calls and echoes the caller's audio instead of connecting the PBX. Changes apply after the current call ends."
             }
@@ -217,14 +247,14 @@ private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modif
                     style = MaterialTheme.typography.bodySmall)
                 val preferredAudioMethod = pendingSettings?.audioMethod ?: cur.audioMethod
                 Choice("Cellular audio", listOf(AudioMethod.AUTO, AudioMethod.LEGACY, AudioMethod.OFFICIAL), preferredAudioMethod,
-                    { when (it) { AudioMethod.AUTO -> "Automatic"; AudioMethod.LEGACY -> "Direct telephony"; else -> "Call redirection" } },
+                    { when (it) { AudioMethod.AUTO -> "Automatic"; AudioMethod.LEGACY -> "Direct telephony"; else -> "Cellular redirection" } },
                     enabled = { it != AudioMethod.OFFICIAL || Build.VERSION.SDK_INT >= 33 }) {
                     rt.applySettings { current -> current.copy(audioMethod = it) }
                 }
                 Text(when (preferredAudioMethod) {
-                    AudioMethod.AUTO -> "Tries call redirection first, then directly configure Telephony device if needed."
-                    AudioMethod.LEGACY -> "Captures call audio and sends outgoing audio through the Telephony device."
-                    else -> "Uses Android 13+ APIs to capture and inject cellular call audio."
+                    AudioMethod.AUTO -> "Prefers cellular call redirection; falls back to direct telephony during setup."
+                    AudioMethod.LEGACY -> "Uses direct cellular audio capture and playback, without redirection fallback."
+                    else -> "Uses cellular call redirection only. Requires Android 13+ and privileged access."
                 } + " Changes apply to the next call.", style = MaterialTheme.typography.bodySmall)
                 if (preferredAudioMethod != cur.audioMethod) {
                     Text("Applies after current calls end.", style = MaterialTheme.typography.bodySmall)
@@ -233,6 +263,9 @@ private fun Screen(rt: GatewayRuntime, editor: SipSettingsDraft, modifier: Modif
             Section("Diagnostics") {
                 Text("Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT}")
                 Text("requestedCallAccess=${cur.callAccess} effective=${h.effectiveCallAccess} audio=${cur.audioMethod}")
+                if (callAudio.backend.isNotEmpty()) Text("Last reported audio method: ${callAudio.backendLabel}")
+                if (callAudio.muteDetail.isNotEmpty()) Text("Playback mute: ${callAudio.muteDetail}")
+                if (callAudio.restoreDetail.isNotEmpty()) Text("Playback restoration: ${callAudio.restoreDetail}")
                 Text(h.privileged?.entries?.joinToString("\n") { "${it.key}=${it.value}" } ?: "Waiting for helper")
                 Text(h.privilegedDetail)
                 Text(h.lastSetupLog)

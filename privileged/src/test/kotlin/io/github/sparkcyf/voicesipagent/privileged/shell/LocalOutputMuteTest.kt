@@ -1,5 +1,6 @@
 package io.github.sparkcyf.voicesipagent.privileged.shell
 
+import io.github.sparkcyf.voicesipagent.privileged.CallAudioStatus
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -59,10 +60,17 @@ class LocalOutputMuteTest {
     @Test fun initiallyMutedStreamIsNeverUnmutedByUs() {
         val audio = Audio().apply { voiceCallMuted = true }
         val mute = LocalOutputMute(audio)
+        mute.beginCall()
         assertEquals("already muted: voice-call stream (preserved)", mute.mute(false))
         mute.mute(false)
+        assertEquals(CallAudioStatus.PRESERVED, mute.observedMute())
+        assertFalse(mute.ownsOutputChange)
         assertEquals("preserved existing voice-call stream mute (tap closed)", mute.restore("tap closed"))
+        assertFalse(mute.restorationPending)
         assertTrue(audio.voiceCallMuted)
+        mute.beginCall()
+        assertTrue(audio.voiceCallMuted)
+        assertEquals(CallAudioStatus.NOT_REQUESTED, mute.observedMute())
         assertTrue(audio.streamRequests.isEmpty())
     }
 
@@ -106,14 +114,30 @@ class LocalOutputMuteTest {
     @Test fun failedRestoreKeepsOwnershipUntilARetrySucceeds() {
         val audio = Audio()
         val mute = LocalOutputMute(audio)
+        mute.beginCall()
         mute.mute(false)
         audio.failUnmute = true
-        assertTrue(mute.restore("tap closed").contains("restoration pending"))
+        val failed = mute.restore("tap closed")
+        assertTrue(failed.contains("restoration pending"))
+        assertEquals(failed, mute.lastRestoreResult)
+        assertTrue(mute.restorationPending)
+        assertTrue(mute.ownsOutputChange)
+        assertTrue(runCatching { mute.beginCall() }.isFailure)
+        assertEquals(failed, mute.lastRestoreResult)
         assertTrue(audio.voiceCallMuted)
         audio.failUnmute = false
-        assertEquals("restored voice-call stream (retry)", mute.restore("retry"))
+        val restored = mute.restore("retry")
+        assertEquals("restored voice-call stream (retry)", restored)
+        assertFalse(mute.restorationPending)
+        assertFalse(mute.ownsOutputChange)
         assertFalse(audio.voiceCallMuted)
         assertEquals(listOf(true, false, false), audio.streamRequests)
+        assertEquals("not muted", mute.restore("again"))
+        assertEquals(restored, mute.lastRestoreResult)
+        mute.beginCall()
+        assertFalse(mute.requested)
+        assertEquals("", mute.lastMuteResult)
+        assertEquals("", mute.lastRestoreResult)
     }
 
     @Test fun ignoredUnmuteDoesNotReportSuccessOrForgetOwnership() {
@@ -155,4 +179,19 @@ class LocalOutputMuteTest {
         audio.acceptMode = true
         assertEquals("restored redirection mode (retry), mode=0", mute.restore("retry"))
     }
+
+    @Test fun observedMuteFollowsAndroidStateIndependentlyOfTheRequest() {
+        val audio = Audio().apply { acceptMute = false }
+        val mute = LocalOutputMute(audio)
+        mute.beginCall()
+        assertEquals(CallAudioStatus.NOT_REQUESTED, mute.observedMute())
+        mute.mute(false)
+        assertTrue(mute.requested)
+        assertEquals(CallAudioStatus.NOT_APPLIED, mute.observedMute())
+        audio.voiceCallMuted = true
+        assertEquals(CallAudioStatus.APPLIED, mute.observedMute())
+        audio.voiceCallMuted = false
+        assertEquals(CallAudioStatus.NOT_APPLIED, mute.observedMute())
+    }
+
 }

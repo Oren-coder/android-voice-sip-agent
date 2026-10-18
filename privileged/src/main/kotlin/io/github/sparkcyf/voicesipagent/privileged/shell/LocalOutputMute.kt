@@ -1,6 +1,7 @@
 package io.github.sparkcyf.voicesipagent.privileged.shell
 
 import android.media.AudioManager
+import io.github.sparkcyf.voicesipagent.privileged.CallAudioStatus
 
 /** Owns only our output-mute changes. The caller serializes access and ties restoration to the tap. */
 internal class LocalOutputMute(private val audio: AudioControl) {
@@ -16,8 +17,41 @@ internal class LocalOutputMute(private val audio: AudioControl) {
 
     private enum class Method { REDIRECT_MODE, VOICE_CALL_STREAM, PRESERVE_STREAM_MUTE }
     private var method: Method? = null
+    var requested = false; private set
+    var lastMuteResult = ""; private set
+    var lastRestoreResult = ""; private set
+    var restorationPending = false; private set
+    private var requestState = CallAudioStatus.NOT_REQUESTED
+    val ownsOutputChange: Boolean
+        get() = method == Method.REDIRECT_MODE || method == Method.VOICE_CALL_STREAM
 
-    fun mute(useRedirectMode: Boolean): String = reportFailure("mute") {
+    fun beginCall() {
+        check(!ownsOutputChange) { "Local playback restoration is still pending" }
+        method = null
+        requested = false
+        lastMuteResult = ""
+        lastRestoreResult = ""
+        restorationPending = false
+        requestState = CallAudioStatus.NOT_REQUESTED
+    }
+
+    fun observedMute(): String = try {
+        when (method) {
+            Method.REDIRECT_MODE -> if (audio.mode == MODE_CALL_REDIRECT) CallAudioStatus.APPLIED else CallAudioStatus.NOT_APPLIED
+            Method.VOICE_CALL_STREAM -> if (audio.voiceCallMuted) CallAudioStatus.APPLIED else CallAudioStatus.NOT_APPLIED
+            Method.PRESERVE_STREAM_MUTE -> if (audio.voiceCallMuted) CallAudioStatus.PRESERVED else CallAudioStatus.NOT_APPLIED
+            null -> requestState
+        }
+    } catch (_: Exception) {
+        CallAudioStatus.UNKNOWN
+    }
+
+    fun mute(useRedirectMode: Boolean): String {
+        requested = true
+        return applyMute(useRedirectMode).also { lastMuteResult = it }
+    }
+
+    private fun applyMute(useRedirectMode: Boolean): String = reportFailure("mute") {
         method?.let {
             val stillMuted = when (it) {
                 Method.REDIRECT_MODE -> audio.mode == MODE_CALL_REDIRECT
@@ -27,7 +61,10 @@ internal class LocalOutputMute(private val audio: AudioControl) {
                 else "failed: ${description(it)} no longer muted; restoration pending"
         }
         val before = audio.mode
-        if (before != AudioManager.MODE_IN_CALL) return@reportFailure "skipped: mode=$before"
+        if (before != AudioManager.MODE_IN_CALL) {
+            requestState = CallAudioStatus.NOT_APPLIED
+            return@reportFailure "skipped: mode=$before"
+        }
         if (useRedirectMode) {
             // Record ownership before calling: a request may apply even if its acknowledgement fails.
             method = Method.REDIRECT_MODE
@@ -46,7 +83,15 @@ internal class LocalOutputMute(private val audio: AudioControl) {
         }
     }
 
-    fun restore(why: String): String = reportFailure("restore") {
+    fun restore(why: String): String {
+        if (method == null) return "not muted"
+        return applyRestore(why).also {
+            lastRestoreResult = it
+            restorationPending = ownsOutputChange
+        }
+    }
+
+    private fun applyRestore(why: String): String = reportFailure("restore") {
         val owned = method ?: return@reportFailure "not muted"
         when (owned) {
             Method.PRESERVE_STREAM_MUTE -> {
@@ -81,6 +126,7 @@ internal class LocalOutputMute(private val audio: AudioControl) {
     private inline fun reportFailure(action: String, block: () -> String): String = try {
         block()
     } catch (e: Exception) {
+        if (action == "mute") requestState = CallAudioStatus.UNKNOWN
         "failed: $action ${e.javaClass.simpleName}: ${e.message}" +
             if (method != null) "; restoration pending" else ""
     }

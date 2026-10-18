@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.util.Log
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
+import io.github.sparkcyf.voicesipagent.privileged.CallAudioStatus
 import io.github.sparkcyf.voicesipagent.privileged.IPrivilegedService
 import io.github.sparkcyf.voicesipagent.privileged.DialerRoleResult
 import kotlin.system.exitProcess
@@ -26,6 +27,7 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     private val shellCtx = ShellEnv.shellContext(context)
     private var tap: CallAudioTap? = null
     private var lastTapStats = "no tap yet"
+    private var lastBackend = ""
     private val audioManager by lazy { ShellEnv.audioManager(shellCtx) }
     private val dialerPlatform by lazy { ShellDialerPlatform(shellCtx, appUid) }
     private val dialerRoles by lazy { DialerRoles(appPackage, dialerPlatform) }
@@ -161,13 +163,14 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     override fun openCallAudio(method: Int, sampleRate: Int): ParcelFileDescriptor {
         enforceCaller()
         closeCallAudio()
+        synchronized(muteLock) { localOutputMute.beginCall() }
         val owner = Any()
         val t = CallAudioTap(shellCtx, method, sampleRate) { onTapClosed(owner) }
         // Register before starting the worker threads so a tap that closes during open cannot later
         // acquire a mute lease. setLocalOutputMuted is serialized with open/close on the service.
         synchronized(muteLock) { muteTapOwner = owner }
         return try {
-            asHelper { t.open() }.also { tap = t }
+            asHelper { t.open() }.also { tap = t; lastBackend = t.usedMethod }
         } catch (e: Throwable) {
             lastTapStats = t.stats()
             Log.w(TAG, "openCallAudio failed: $e")
@@ -190,6 +193,28 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     override fun audioStats(): String {
         enforceCaller()
         return tap?.stats() ?: lastTapStats
+    }
+
+    @Synchronized
+    override fun callAudioStatus(): Bundle {
+        enforceCaller()
+        return asHelper {
+            synchronized(muteLock) {
+                CallAudioStatus(
+                    active = tap?.isOpen == true,
+                    backend = tap?.usedMethod ?: lastBackend,
+                    muteRequested = localOutputMute.requested,
+                    outputMute = localOutputMute.observedMute(),
+                    muteDetail = localOutputMute.lastMuteResult,
+                    ownsOutputChange = localOutputMute.ownsOutputChange,
+                    restorationPending = localOutputMute.restorationPending,
+                    restoreDetail = localOutputMute.lastRestoreResult,
+                    voiceCallStreamMuted = runCatching {
+                        audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)
+                    }.getOrNull(),
+                ).toBundle()
+            }
+        }
     }
 
     @Synchronized

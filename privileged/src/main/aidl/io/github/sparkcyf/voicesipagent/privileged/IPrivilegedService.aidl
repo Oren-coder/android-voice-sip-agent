@@ -54,4 +54,7 @@ interface IPrivilegedService {
 
     /** Explicit restoration; only changes the role while this app still holds it. */
     Bundle restoreDefaultDialer(String previousHolder) = 11;
+
+    /** Structured current/last tap and output restoration state. See CallAudioStatus. */
+    Bundle callAudioStatus() = 12;
 }

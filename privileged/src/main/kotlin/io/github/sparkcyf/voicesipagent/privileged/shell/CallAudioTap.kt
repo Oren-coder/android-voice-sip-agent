@@ -38,6 +38,7 @@ internal class CallAudioTap(
     private lateinit var track: AudioTrack
     private lateinit var local: FileDescriptor
     @Volatile private var running = false
+    val isOpen: Boolean get() = running
     private var closed = false
     private var downThread: Thread? = null
     private var upThread: Thread? = null

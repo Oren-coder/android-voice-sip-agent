@@ -115,8 +115,13 @@ class GatewayRuntime private constructor(context: Context) {
     private fun audioFormat() = if (settings.sipStack == SipStack.PJSUA2)
         PcmFormat.WIDEBAND else PcmFormat.NARROWBAND
 
+    private val audioOpener = PrivilegedAudioOpener(shizuku, { settings.audioMethod },
+        { settings.muteEarpiece }, ::audioFormat,
+        onStatusChanged = { worker.execute { updateAudioStatusPolling() } })
+    val callAudioStatus get() = audioOpener.status
+
     val cellular = CellularEndpoint(app,
-        PrivilegedAudioOpener(shizuku, { settings.audioMethod }, { settings.muteEarpiece }, ::audioFormat),
+        audioOpener,
         logger = { AppLog.i(it) },
     )
     /** [SipUserAgent] or [PjsipEndpoint], per [GatewaySettings.sipStack]. */
@@ -139,6 +144,7 @@ class GatewayRuntime private constructor(context: Context) {
     private var pendingDialerChange: DialerChange? = null
     private var dialerRetry: ScheduledFuture<*>? = null
     private var healthCheck: ScheduledFuture<*>? = null
+    private var audioStatusCheck: ScheduledFuture<*>? = null
     @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val dialerHandoffStore = DialerHandoffStore(app)
     private val dialerHandoff = DialerHandoff(app.packageName, dialerHandoffStore, object : DialerHandoff.Backend {
@@ -195,9 +201,11 @@ class GatewayRuntime private constructor(context: Context) {
                 if (shizuku.state != state || shizuku.service !== svc) return@execute
                 _health.update { it.copy(shizuku = state, shizukuDetail = detail) }
                 if (state == ShizukuConnector.State.CONNECTED && svc != null) {
+                    audioOpener.refreshStatus()
                     if (pendingDialerChange?.acquire == true) attemptDialerChange()
                     runSetup()
                 } else {
+                    audioOpener.helperDisconnected()
                     updatePrivileged(null, detail)
                 }
             }
@@ -249,6 +257,7 @@ class GatewayRuntime private constructor(context: Context) {
         stopBackgroundTasks()
         runCatching { stopBridge() }.onFailure { AppLog.w("bridge cleanup failed", it) }
         runCatching { stopSip(releaseLibrary = true) }.onFailure { AppLog.w("SIP cleanup failed", it) }
+        audioOpener.closeForShutdown()
         shizuku.service?.let { svc ->
             runCatching { svc.setupCallAccess(app.packageName, false, _health.value.effectiveCallAccess) }
                 .onFailure { AppLog.w("companion cleanup failed", it) }
@@ -274,6 +283,8 @@ class GatewayRuntime private constructor(context: Context) {
         healthCheck = null
         dialerRetry?.cancel(false)
         dialerRetry = null
+        audioStatusCheck?.cancel(false)
+        audioStatusCheck = null
         val callback = networkCallback
         networkCallback = null
         if (callback != null) runCatching {
@@ -281,6 +292,28 @@ class GatewayRuntime private constructor(context: Context) {
         }.onFailure { AppLog.w("network callback cleanup failed", it) }
         setupPending = false
         worker.allowCoreThreadTimeOut(true)
+    }
+
+    /** Observe only an open tap; idle and saved-off operation add no recurring audio work. */
+    private fun updateAudioStatusPolling() {
+        if (!gatewayEnabled || !callAudioStatus.value.active) {
+            audioStatusCheck?.cancel(false)
+            audioStatusCheck = null
+        } else if (audioStatusCheck == null) {
+            audioStatusCheck = worker.scheduleWithFixedDelay({
+                audioOpener.refreshStatus()
+                updateAudioStatusPolling()
+            }, 1, 1, TimeUnit.SECONDS)
+        }
+    }
+
+    fun retryAudioRestoration() = worker.execute {
+        if (hasActiveWork() || callAudioStatus.value.active) return@execute
+        // Include calls that our InCallService may not currently see. Unknown means wait.
+        val idle = runCatching {
+            shizuku.service?.let { DialerRoleResult.fromBundle(it.dialerState()).state?.inCall == false }
+        }.getOrNull() == true
+        if (idle) audioOpener.retryRestoration()
     }
 
     // ------------------------------------------------------------ privileged setup / health
@@ -354,6 +387,7 @@ class GatewayRuntime private constructor(context: Context) {
 
     fun refreshCallAccess() = worker.execute {
         configureCallAccess()
+        if (shizuku.service != null) audioOpener.refreshStatus()
         updateReadiness()
         // Changing companion registration can change binding. Defer app-controlled setup while
         // Telecom has any call, including calls outside the bridge.
@@ -836,6 +870,7 @@ class GatewayRuntime private constructor(context: Context) {
             appendLine("dialerChangePending=${h.dialerChangePending} running=${h.dialerChangeRunning} ${_dialerMessage.value}")
             appendLine("calls=${h.calls.summary} settingsPending=${h.settingsPending}")
             appendLine("loopback=${h.loopbackTest} session=${h.session}")
+            appendLine("callAudio=${callAudioStatus.value}")
             shizuku.service?.let { appendLine("tap=${runCatching { it.audioStats() }.getOrDefault("?")}") }
         }
     }
