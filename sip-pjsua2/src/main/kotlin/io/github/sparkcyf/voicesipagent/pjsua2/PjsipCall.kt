@@ -15,6 +15,7 @@ import org.pjsip.pjsua2.OnCallMediaStateParam
 import org.pjsip.pjsua2.OnCallStateParam
 import org.pjsip.pjsua2.OnDtmfDigitParam
 import org.pjsip.pjsua2.SipHeader
+import org.pjsip.pjsua2.StreamStat
 import org.pjsip.pjsua2.pjmedia_type
 import org.pjsip.pjsua2.pjsip_inv_state
 import org.pjsip.pjsua2.pjsua_call_media_status
@@ -171,6 +172,10 @@ internal class PjsipCall(
                 if (peer != null) publishMedia(port)
             }
             pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED -> {
+                // The stream may already be gone; the periodic check logged the last counters.
+                runCatching { c.getStreamStat(0) }.getOrNull()?.let { ss ->
+                    try { log.info("call $id final rtp ${describe(ss)}") } catch (_: Exception) {} finally { ss.delete() }
+                }
                 val cause = localCause ?: if (state == LegState.CONNECTED) HangupCause.NORMAL else SipCauses.toCause(code)
                 log.info("call $id ended: $code $cause")
                 finish(cause)
@@ -213,7 +218,13 @@ internal class PjsipCall(
         if (state != LegState.CONNECTED || peer == null) return
         val rx = try {
             val ss = c.getStreamStat(0)
-            ss.rtcp.rxStat.pkt.also { ss.delete() }
+            try {
+                // Counters only: RTP/RTCP and jitter-buffer state plus the bridge FIFOs.
+                log.info("call $id rtp ${describe(ss)} ${port.stats()}")
+                ss.rtcp.rxStat.pkt
+            } finally {
+                ss.delete()
+            }
         } catch (_: Exception) {
             return
         }
@@ -243,6 +254,19 @@ internal class PjsipCall(
             cp?.delete()
             c?.delete()
         }
+    }
+
+    private fun describe(ss: StreamStat): String {
+        val rtcp = ss.rtcp
+        val rx = rtcp.rxStat
+        val tx = rtcp.txStat
+        val jb = ss.jbuf
+        return "rx[pkt=${rx.pkt} loss=${rx.loss} discard=${rx.discard} dup=${rx.dup} reorder=${rx.reorder}" +
+            " jitter=${rx.jitterUsec.mean / 1000}/${rx.jitterUsec.max / 1000}ms" +
+            " ipdv=${rtcp.rxIpdvUsec.mean / 1000}/${rtcp.rxIpdvUsec.max / 1000}ms]" +
+            " tx[pkt=${tx.pkt} peerLoss=${tx.loss}] rtt=${rtcp.rttUsec.mean / 1000}ms" +
+            " jbuf[delay=${jb.avgDelayMsec}/${jb.maxDelayMsec}ms prefetch=${jb.prefetch} size=${jb.size}" +
+            " lost=${jb.lost} discard=${jb.discard} empty=${jb.empty}]"
     }
 
     private fun codecOf(c: GwCall): String = try {
