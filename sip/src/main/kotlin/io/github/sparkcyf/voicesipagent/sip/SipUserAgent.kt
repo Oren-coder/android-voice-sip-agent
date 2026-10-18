@@ -73,8 +73,7 @@ class SipUserAgent(
         stopping = false
         transport = SipTransport(config.localPort, log) { msg, from -> post { onMessage(msg, from) } }
         transport.start()
-        resolve()
-        log.info("started on $localIp:$localPort -> ${account.server}:${account.port}")
+        log.info("started on UDP $localPort -> ${account.server}:${account.port}")
         executor.scheduleWithFixedDelay({ checkMedia() }, 5, 5, TimeUnit.SECONDS)
         register()
     }
@@ -87,6 +86,7 @@ class SipUserAgent(
             stopping = true
             calls.values.toList().forEach { it.hangup(HangupCause.NORMAL) }
             regRefresh?.cancel(false)
+            if (!::serverAddr.isInitialized) { done.countDown(); return@post }
             sendRegister(0, null) { done.countDown() }
         }
         done.await(timeoutMs, TimeUnit.MILLISECONDS)
@@ -101,7 +101,6 @@ class SipUserAgent(
     /** Call when the network changes: refreshes our address and re-registers. */
     fun refreshRegistration() = post {
         if (!started || stopping) return@post
-        resolve()
         register()
     }
 
@@ -126,9 +125,14 @@ class SipUserAgent(
     // ---------------------------------------------------------------- registration
 
     private fun register() {
+        if (stopping) return
         regRefresh?.cancel(false)
         regAuthAttempts = 0
         setStatus(false, "registering")
+        try { resolve() } catch (e: Exception) {
+            registerFailed("cannot resolve server: ${e.message}")
+            return
+        }
         sendRegister(config.registerExpiresSec, null)
     }
 
@@ -145,6 +149,7 @@ class SipUserAgent(
         req.headers.add("Expires", expires.toString())
         auth?.let { req.headers.add(it.first, it.second) }
         sendClient(req) { r ->
+            if (stopping && expires > 0) return@sendClient
             when {
                 r == null -> {
                     onDone?.invoke()

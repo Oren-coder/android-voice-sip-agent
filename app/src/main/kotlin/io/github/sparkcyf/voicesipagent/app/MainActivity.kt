@@ -334,8 +334,9 @@ private fun SettingsSection(rt: GatewayRuntime, editor: SipSettingsDraft) = with
         }
         Toggle("Unregister while the phone cannot take calls", cur.holdSipWhenNotReady,
             { rt.setHoldSipWhenNotReady(it) }) {
-            "Lets the PBX see this trunk as unavailable and fail over, e.g. when Shizuku stops after a reboot. " +
-                "Waits ${GatewayRuntime.SIP_HOLD_GRACE_MS / 1000} s after a problem appears and never during calls; registers again as soon as the phone is ready."
+            "At startup, waits for the phone to be ready before registering with the PBX. " +
+                "Later problems get ${GatewayRuntime.SIP_HOLD_GRACE_MS / 1000} s to recover before unregistering so the PBX can fail over. " +
+                "Registration changes wait for calls to end; registers again as soon as the phone is ready."
         }
         Toggle("pjsip debug log", cur.sipDebugLog, { rt.setSipDebugLog(it) }) {
             "Info-level logs with masked numbers"

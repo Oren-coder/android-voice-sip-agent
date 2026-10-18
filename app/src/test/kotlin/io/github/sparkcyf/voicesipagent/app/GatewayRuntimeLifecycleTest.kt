@@ -1,26 +1,35 @@
 package io.github.sparkcyf.voicesipagent.app
 
 import android.app.role.RoleManager
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.os.Bundle
 import android.os.Process
+import android.os.SystemClock
 import android.telecom.TelecomManager
 import android.util.Log
 import io.github.sparkcyf.voicesipagent.gateway.CallBridge
+import io.github.sparkcyf.voicesipagent.gateway.DialPolicy
 import io.github.sparkcyf.voicesipagent.pjsua2.PjsipConfig
 import io.github.sparkcyf.voicesipagent.pjsua2.PjsipEndpoint
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
 import io.github.sparkcyf.voicesipagent.privileged.AudioMethod
 import io.github.sparkcyf.voicesipagent.privileged.DialerRoleResult
 import io.github.sparkcyf.voicesipagent.privileged.IPrivilegedService
+import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 import io.github.sparkcyf.voicesipagent.telephony.CallSnapshot
 import io.github.sparkcyf.voicesipagent.telephony.CellularEndpoint
 import io.github.sparkcyf.voicesipagent.voice.EndpointStatus
+import io.github.sparkcyf.voicesipagent.voice.EndpointStatusListener
+import io.github.sparkcyf.voicesipagent.voice.HangupCause
 import org.junit.Assert.*
 import org.junit.Test
 import org.mockito.MockedConstruction
@@ -320,8 +329,35 @@ class GatewayRuntimeLifecycleTest {
         assertTrue(f.runtime.health.value.sip.detail.startsWith("held unregistered: "))
     }
 
+    @Test fun healthCheckFailureClosesAdmissionAndRecoversWithoutRestartingSip(): Unit =
+        Fixture(enabled = true, holder = "gateway", holdSip = true, healthy = true).use { f ->
+            f.connect()
+            f.sipStatus(EndpointStatus(true, "registered"))
+            assertTrue(f.runtime.health.value.cellularReady)
+            assertNull(f.dialPolicy.check("12345"))
+            `when`(f.runtime.cellular.isEmergencyNumber("112")).thenReturn(true)
+            assertEquals(HangupCause.FORBIDDEN, f.dialPolicy.check("112"))
+
+            `when`(f.helper.health(anyString())).thenThrow(IllegalStateException("helper failed"))
+            f.checkHealth()
+            val failed = f.runtime.health.value
+            assertNull(failed.privileged)
+            assertFalse(failed.cellularReady)
+            assertTrue(failed.privilegedDetail.contains("helper failed"))
+            assertTrue(f.runtime.settings.takeover)
+            assertTrue(failed.sip.ready)
+            assertEquals(HangupCause.UNAVAILABLE, f.dialPolicy.check("12345"))
+            verify(f.endpoints.constructed().single(), never()).stop(anyLong(), anyBoolean())
+
+            doReturn(f.helperHealth).`when`(f.helper).health(anyString())
+            f.checkHealth()
+            assertTrue(f.runtime.health.value.cellularReady)
+            assertNull(f.dialPolicy.check("12345"))
+            assertEquals(1, f.endpoints.constructed().size)
+        }
+
     private class Fixture(enabled: Boolean = false, var holder: String? = "phone", rejectLaunch: Boolean = false,
-        holdSip: Boolean = false) : AutoCloseable {
+        holdSip: Boolean = false, healthy: Boolean = false) : AutoCloseable {
         private val scopes = mutableListOf<AutoCloseable>()
         private val workerScopes = mutableListOf<AutoCloseable>()
         lateinit var connector: ShizukuConnector
@@ -334,9 +370,13 @@ class GatewayRuntimeLifecycleTest {
             private set
         private var listener: ShizukuConnector.Listener? = null
         private var helperState = ShizukuConnector.State.STOPPED
+        private var sipListener: EndpointStatusListener? = null
+        lateinit var dialPolicy: DialPolicy
+            private set
         val context = mock(Context::class.java)
         val network = mock(ConnectivityManager::class.java)
         val helper = mock(IPrivilegedService::class.java)
+        val helperHealth = mock(Bundle::class.java)
         val runtime: GatewayRuntime
         private val worker: ScheduledThreadPoolExecutor
         var serviceToken = Any()
@@ -346,7 +386,15 @@ class GatewayRuntimeLifecycleTest {
             val role = mock(RoleManager::class.java)
             `when`(context.applicationContext).thenReturn(context)
             `when`(context.packageName).thenReturn("gateway")
-            `when`(context.packageManager).thenReturn(mock(PackageManager::class.java))
+            val pm = mock(PackageManager::class.java)
+            `when`(context.packageManager).thenReturn(pm)
+            val appInfo = ApplicationInfo().apply { this.enabled = true }
+            `when`(pm.getActivityInfo(any(ComponentName::class.java), anyInt())).thenReturn(ActivityInfo().apply {
+                this.enabled = true; applicationInfo = appInfo
+            })
+            `when`(pm.getServiceInfo(any(ComponentName::class.java), anyInt())).thenReturn(ServiceInfo().apply {
+                this.enabled = true; applicationInfo = appInfo; permission = Manifest.permission.BIND_INCALL_SERVICE
+            })
             `when`(context.getSystemService(TelecomManager::class.java)).thenReturn(telecom)
             `when`(context.getSystemService(RoleManager::class.java)).thenReturn(role)
             `when`(context.getSystemService(ConnectivityManager::class.java)).thenReturn(network)
@@ -363,7 +411,8 @@ class GatewayRuntimeLifecycleTest {
                 holder = it.getArgument<String>(0).ifEmpty { "phone" }
                 result(DialerRoleResult.SUCCESS)
             }
-            `when`(helper.setupCallAccess(anyString(), anyBoolean(), anyInt())).thenReturn(mock(Bundle::class.java))
+            for (key in HealthKeys.BOOLEAN_KEYS) `when`(helperHealth.getBoolean(key)).thenReturn(healthy)
+            `when`(helper.setupCallAccess(anyString(), anyBoolean(), anyInt())).thenReturn(helperHealth)
             scopes += mockConstruction(SettingsStore::class.java) { store, _ ->
                 `when`(store.load()).thenReturn(GatewaySettings(takeover = enabled, callAccess = CallAccess.DIALER,
                     server = "pbx.invalid", username = "test", password = "test", holdSipWhenNotReady = holdSip))
@@ -395,14 +444,19 @@ class GatewayRuntimeLifecycleTest {
             worker.submit {
                 workerScopes += mockStatic(Log::class.java)
                 workerScopes += mockStatic(Process::class.java)
+                workerScopes += mockStatic(SystemClock::class.java)
                 workerScopes += mockConstruction(ComponentName::class.java)
                 workerScopes += mockConstruction(Intent::class.java)
                 workerScopes += mockConstruction(ConnectivityManager.NetworkCallback::class.java)
                 endpoints = mockConstruction(PjsipEndpoint::class.java) { endpoint, construction ->
                     `when`(endpoint.config).thenReturn(construction.arguments()[0] as PjsipConfig)
                     `when`(endpoint.status).thenReturn(EndpointStatus(false, "test endpoint"))
+                    doAnswer { sipListener = it.getArgument(0); null }.`when`(endpoint).addStatusListener(
+                        any(EndpointStatusListener::class.java) ?: EndpointStatusListener { _, _ -> })
                 }.also { workerScopes += it }
-                bridges = mockConstruction(CallBridge::class.java).also { workerScopes += it }
+                bridges = mockConstruction(CallBridge::class.java) { _, construction ->
+                    dialPolicy = construction.arguments()[5] as DialPolicy
+                }.also { workerScopes += it }
             }.get(3, TimeUnit.SECONDS)
             runtime.start()
             drain()
@@ -426,6 +480,18 @@ class GatewayRuntimeLifecycleTest {
         fun connect() {
             promote()
             transition(ShizukuConnector.State.CONNECTED)
+            drain()
+        }
+        fun sipStatus(status: EndpointStatus) {
+            val endpoint = endpoints.constructed().last()
+            `when`(endpoint.status).thenReturn(status)
+            sipListener!!.onStatusChanged(endpoint, status)
+            drain()
+        }
+        fun checkHealth() {
+            worker.submit {
+                GatewayRuntime::class.java.getDeclaredMethod("periodicCheck").apply { isAccessible = true }.invoke(runtime)
+            }.get(3, TimeUnit.SECONDS)
             drain()
         }
         fun drain() {

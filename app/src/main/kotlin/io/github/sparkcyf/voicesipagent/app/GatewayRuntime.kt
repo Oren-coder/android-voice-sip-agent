@@ -371,6 +371,7 @@ class GatewayRuntime private constructor(context: Context) {
             }
         } catch (e: Exception) {
             AppLog.w("health check failed", e)
+            updatePrivileged(null, "Health check failed: ${e.message}")
         }
         _health.update { it.copy(inCallServiceBound = CellularEndpoint.isInCallServiceBound) }
     }
@@ -829,7 +830,11 @@ class GatewayRuntime private constructor(context: Context) {
                 busyPolicy = s.busyPolicy,
                 allowedDialPrefixes = s.allowedPrefixes.split(',').map { it.trim() }.filter { it.isNotEmpty() },
             ),
-            dialPolicyForA = { n -> if (cellular.isEmergencyNumber(n)) HangupCause.FORBIDDEN else null },
+            dialPolicyForA = { n -> when {
+                !_health.value.cellularReady -> HangupCause.UNAVAILABLE
+                cellular.isEmergencyNumber(n) -> HangupCause.FORBIDDEN
+                else -> null
+            } },
             log = { AppLog.i("bridge: $it") },
         )
         b.addListener { session ->

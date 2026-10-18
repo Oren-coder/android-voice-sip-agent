@@ -86,7 +86,7 @@ Android 11 尚未测试。各厂商的隐藏 API 和音频路由不同，其他�
 | User / password | PBX 上 trunk 的凭据 |
 | Cellular inbound → SIP target | 蜂窝来电时在 PBX 上呼叫的 DID；留空则使用 SIP 用户名 |
 | Allowed dial-out prefixes | 逗号分隔；留空表示允许拨出任何号码 |
-| Unregister while the phone cannot take calls | 开启（默认）：蜂窝侧未就绪（Shizuku、通话接入或通话音频缺失）时保持 SIP 账号未注册，让 PBX 看到 trunk 不可用并转移。问题持续 45 秒后才注销；通话期间从不改变注册；手机恢复就绪后立即重新注册。启动或打开开关后，只有手机就绪才注册。 |
+| Unregister while the phone cannot take calls | 开启（默认）：启动或打开接管开关后，等待蜂窝侧（Shizuku、通话接入和通话音频）就绪才向 PBX 注册。首次就绪后，问题持续 45 秒才注销，让 PBX 将呼叫转移到其他线路。注册状态的改变等待通话结束；手机恢复就绪后立即重新注册。SIP 仍注册但手机不可用时，呼入返回 `480 Temporarily Unavailable`。关闭此选项后，无论本地是否就绪都允许 SIP 注册；不可用时仍返回 `480`。 |
 
 点击 **Save & apply** 保存；通话中提交的修改会等待当前通话结束后生效。
 接管关闭时保存的 SIP 设置将在下次开启接管时使用。
@@ -151,8 +151,7 @@ adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
   在上表的社区测试设备上，只有这个组合能双向通话。
 - **MediaTek / 传音（如 Infinix）手机上的 Shizuku 13.6.0**：App 的特权服务始终无法启动
   （`LoadedApk.makeApplicationInner` 中的 `NullPointerException`；
-  [RikkaApps/Shizuku#2048](https://github.com/RikkaApps/Shizuku/issues/2048)、
-  [#1198](https://github.com/RikkaApps/Shizuku/issues/1198)）。请改装 Shizuku 13.5.4。
+  [RikkaApps/Shizuku#1198](https://github.com/RikkaApps/Shizuku/issues/1198)）。请改装 Shizuku 13.5.4。
 - **重启 Shizuku 后请打开一次 App**（或点一下网关通知）。重启后的 Shizuku 服务可能不会把连接交给已在运行的 App
   （在 Android 17 + Shizuku 13.6.0 上观察到），App 回到前台时才会交付。在此之前网关显示 *Shizuku not running*，
   并默认保持未注册。adb 方式：`adb shell monkey -p io.github.sparkcyf.voicesipagent -c android.intent.category.LAUNCHER 1`。

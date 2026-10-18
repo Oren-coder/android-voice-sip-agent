@@ -17,6 +17,16 @@ A health check runs every 60 s while takeover and the foreground service are act
 idle if companion call access is unavailable. SIP, bridging, the Shizuku helper, and network monitoring also
 start only after the service enters foreground; opening the configuration with takeover saved off leaves them stopped.
 
+By default, SIP stays unregistered until local call access and privileged audio access are ready.
+After first readiness, local failures get one 45-second recovery window before SIP unregisters;
+registration changes wait for calls and bridge sessions to end. Incoming calls received while the
+phone is unavailable are rejected with `480`. Local recovery registers SIP again automatically.
+Turning **Unregister while the phone cannot take calls** off allows registration without local readiness;
+the call admission check still applies. Local and PBX failures leave takeover enabled and do not change
+dialer ownership. PBX registration failures use the SIP stack's retries; the built-in stack also reports
+DNS failures and retries them. Unregistration is best effort if the PBX is unreachable, so stale contacts
+may remain until expiry.
+
 On Android 11, turn **Take over calls** on (or tap **Enable takeover**) to grant default-dialer call access.
 With Shizuku connected, this saves your previous dialer and changes the role directly, without the
 system role dialog. Changes wait for current calls to end and can be cancelled while waiting.

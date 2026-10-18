@@ -97,7 +97,7 @@ The handset microphone stays muted while bridging, so local listening does not e
 | User / password | Trunk credentials on the PBX |
 | Cellular inbound → SIP target | DID dialed on the PBX for incoming cellular calls; blank = the SIP user name |
 | Allowed dial-out prefixes | Comma-separated; empty = any number may be dialed out |
-| Unregister while the phone cannot take calls | On (default): keeps the SIP account unregistered while the cellular side is not ready (Shizuku, call access or call audio missing), so the PBX sees the trunk unavailable and can fail over. A problem must last 45 s before unregistering; registration is never changed during calls and resumes as soon as the phone is ready. After startup or switch-on, SIP registers only once the phone is ready. |
+| Unregister while the phone cannot take calls | On (default): at startup or switch-on, waits for the cellular side (Shizuku, call access and call audio) to be ready before registering with the PBX. After first readiness, a problem must last 45 s before unregistering so the PBX can fail over. Registration changes wait for calls to end and registration resumes as soon as the phone is ready. While SIP remains registered but the phone is unavailable, incoming calls receive `480 Temporarily Unavailable`. Turning this option off allows SIP registration regardless of local readiness; unavailable calls still receive `480`. |
 
 Tap **Save & apply**; changes wait for current calls to end. With takeover off, saved SIP settings are
 used when takeover is next enabled.
@@ -164,8 +164,7 @@ Phone numbers are logged with only their last two digits; call audio is never lo
   only combination that gave two-way audio on the community-tested devices above.
 - **Shizuku 13.6.0 on MediaTek / Transsion (e.g. Infinix) phones:** the app's privileged service never
   starts (`NullPointerException` in `LoadedApk.makeApplicationInner`;
-  [RikkaApps/Shizuku#2048](https://github.com/RikkaApps/Shizuku/issues/2048),
-  [#1198](https://github.com/RikkaApps/Shizuku/issues/1198)). Install Shizuku 13.5.4 instead.
+  [RikkaApps/Shizuku#1198](https://github.com/RikkaApps/Shizuku/issues/1198)). Install Shizuku 13.5.4 instead.
 - **After restarting Shizuku, open the app once** (or tap the gateway notification). A restarted Shizuku server
   may not hand its connection to an app that is already running (seen with Shizuku 13.6.0 on Android 17); it does
   so when the app comes to the foreground. Until then the gateway reports *Shizuku not running* and, by default,
