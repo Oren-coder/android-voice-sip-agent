@@ -21,104 +21,168 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   ... --es op sip-debug --ez on true      (pjsip info-level logs; off by default)
  *   ... --es op provision --ez hold_sip false  (keep SIP registered while the cellular side is not ready)
  *
- * Every op replies once the runtime has processed it, e.g.
+ * Every op acknowledges submission with an observed runtime snapshot, e.g.
  *   Broadcast completed: result=1, data="ok: ready=true (Gateway ready) takeover=on sip=ready ..."
- * [RESULT_OK] = 1, [RESULT_ERROR] = 2 (bad op/argument), [RESULT_TIMEOUT] = 3 (still queued; see logcat).
+ * [RESULT_OK] = 1, [RESULT_ERROR] = 2 (bad input or submission/reporting failure),
+ * [RESULT_TIMEOUT] = 3 (queued or running; see logcat). An acknowledgement does not guarantee completion.
  * result=0 with no data means the broadcast never reached this receiver (e.g. a misspelled component).
  * Replies never contain the SIP password.
  */
 class AdbControlReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val rt = GatewayRuntime.get(context)
-        val op = intent.getStringExtra("op")
-        val reply = Reply(goAsync())
-        val describe = try {
-            dispatch(rt, op, intent)
-        } catch (e: IllegalArgumentException) {
-            AppLog.w("adb control: ${e.message}")
+        val ordered = isOrderedBroadcast
+        val reply = Reply(goAsync(), ordered)
+        val op: String
+        val submit: (GatewayRuntime) -> (() -> String)
+        try {
+            op = intent.argument<String>("op") ?: invalid("missing --es op")
+            submit = parseCommand(intent, op)
+        } catch (e: InvalidArgument) {
             reply.send(RESULT_ERROR, "error: ${e.message}")
             return
+        } catch (_: Exception) {
+            reply.send(RESULT_ERROR, "error: could not read command arguments")
+            return
         }
-        Handler(Looper.getMainLooper()).postDelayed({
-            reply.send(RESULT_TIMEOUT, "timeout: op '$op' still queued after ${TIMEOUT_MS / 1000} s; see logcat")
-        }, TIMEOUT_MS)
-        rt.afterQueued {
-            val data = runCatching { describe() }.getOrElse { "${it.javaClass.simpleName}: ${it.message}" }
-            reply.send(RESULT_OK, "ok: $data")
+        try {
+            reply.startTimeout(op)
+            val rt = GatewayRuntime.get(context)
+            val describe = submit(rt)
+            AppLog.i("adb control: accepted $op")
+            rt.afterQueued {
+                val data = try { describe() } catch (_: Exception) {
+                    reply.send(RESULT_ERROR, "error: could not read command state; check logs before retrying")
+                    return@afterQueued
+                }
+                reply.send(RESULT_OK, "ok: $data")
+            }
+        } catch (_: Exception) {
+            // Submission may have succeeded before acknowledgement scheduling failed.
+            reply.send(RESULT_ERROR, "error: could not submit command or schedule reply; check logs before retrying")
         }
     }
 
-    /** Submits [op] and returns how to describe its outcome; throws IllegalArgumentException on bad input. */
-    private fun dispatch(rt: GatewayRuntime, op: String?, intent: Intent): () -> String {
-        val on = intent.getBooleanExtra("on", true)
+    /** Validate and capture extras before submitting anything; merge settings on the runtime worker. */
+    private fun parseCommand(intent: Intent, op: String): (GatewayRuntime) -> (() -> String) {
+        val allowed = when (op) {
+            "status", "setup", "sip-restart" -> emptySet()
+            "loopback", "takeover", "earpiece-mute", "sip-debug" -> setOf("on")
+            "sip-stack" -> setOf("stack")
+            "provision" -> setOf("server", "port", "transport", "srtp", "user", "password", "domain",
+                "target", "prefixes", "audio_method", "call_access", "hold_sip")
+            else -> invalid("unknown op; see README adb control")
+        }
+        if (!intent.extras?.keySet().orEmpty().all { it == "op" || it in allowed })
+            invalid("unexpected argument for $op")
         return when (op) {
-            "status" -> {
+            "status" -> { rt ->
                 rt.afterQueued { rt.statusReport().lines().filter { it.isNotBlank() }.forEach { AppLog.i("status: $it") } }
                 rt::statusLine
             }
-            "setup" -> { rt.runSetup(); rt::statusLine }
-            "sip-restart" -> { rt.restartSip(); rt::statusLine }
-            "loopback" -> { rt.setLoopbackTest(on); rt::statusLine }
-            "takeover" -> { rt.setTakeover(on); rt::statusLine }
-            "earpiece-mute" -> { rt.setMuteEarpiece(on); rt::settingsLine }
-            "sip-debug" -> { rt.setSipDebugLog(on); rt::settingsLine }
-            "sip-stack" -> {
-                val stack = requireNotNull(SipStack.of(intent.getStringExtra("stack"))) {
-                    "sip-stack needs --es stack builtin|pjsua2"
+            "setup" -> { rt -> rt.runSetup(); rt::statusLine }
+            "sip-restart" -> { rt -> rt.restartSip(); rt::statusLine }
+            "loopback", "takeover", "earpiece-mute", "sip-debug" -> {
+                val on = intent.argument<Boolean>("on") ?: true
+                val action: (GatewayRuntime) -> (() -> String) = { rt ->
+                    when (op) {
+                        "loopback" -> rt.setLoopbackTest(on)
+                        "takeover" -> rt.setTakeover(on)
+                        "earpiece-mute" -> rt.setMuteEarpiece(on)
+                        "sip-debug" -> rt.setSipDebugLog(on)
+                    }
+                    if (op == "earpiece-mute" || op == "sip-debug") rt::settingsLine else rt::statusLine
                 }
-                rt.applySettings { it.copy(sipStack = stack) }
-                rt::settingsLine
+                action
+            }
+            "sip-stack" -> {
+                val stack = SipStack.of(intent.argument<String>("stack"))
+                    ?: invalid("sip-stack needs --es stack builtin|pjsua2")
+                val action: (GatewayRuntime) -> (() -> String) = { rt ->
+                    rt.applySettings { it.copy(sipStack = stack) }
+                    rt::settingsLine
+                }
+                action
             }
             "provision" -> {
-                validateProvision(intent)
-                val transport = intent.getStringExtra("transport")?.let { t ->
-                    requireNotNull(SipTransport.of(t)) { "transport must be udp|tcp|tls" }.id
+                val server = intent.argument<String>("server")
+                val port = intent.argument<Int>("port")
+                val transport = intent.argument<String>("transport")?.let {
+                    SipTransport.of(it)?.id ?: invalid("transport must be udp|tcp|tls")
                 }
-                val srtp = intent.getStringExtra("srtp")?.let { v ->
-                    requireNotNull(SrtpPolicy.of(v)) { "srtp must be off|optional|mandatory" }.id
+                val srtp = intent.argument<String>("srtp")?.let {
+                    SrtpPolicy.of(it)?.id ?: invalid("srtp must be off|optional|mandatory")
                 }
-                rt.applySettings { cur ->
-                    cur.copy(
-                        server = intent.getStringExtra("server") ?: cur.server,
-                        port = intent.getIntExtra("port", cur.port),
-                        sipTransport = transport ?: cur.sipTransport,
-                        srtp = srtp ?: cur.srtp,
-                        username = intent.getStringExtra("user") ?: cur.username,
-                        password = intent.getStringExtra("password") ?: cur.password,
-                        domain = intent.getStringExtra("domain") ?: cur.domain,
-                        inboundTarget = intent.getStringExtra("target") ?: cur.inboundTarget,
-                        allowedPrefixes = intent.getStringExtra("prefixes") ?: cur.allowedPrefixes,
-                        audioMethod = intent.getIntExtra("audio_method", cur.audioMethod),
-                        callAccess = intent.getIntExtra("call_access", cur.callAccess),
-                        holdSipWhenNotReady = intent.getBooleanExtra("hold_sip", cur.holdSipWhenNotReady),
-                    )
+                val user = intent.argument<String>("user")
+                val password = intent.argument<String>("password")
+                val domain = intent.argument<String>("domain")
+                val target = intent.argument<String>("target")
+                val prefixes = intent.argument<String>("prefixes")
+                val audioMethod = intent.argument<Int>("audio_method")
+                val callAccess = intent.argument<Int>("call_access")
+                val holdSip = intent.argument<Boolean>("hold_sip")
+                if (port != null && port !in 1..65535) invalid("port must be 1..65535")
+                if (audioMethod != null && audioMethod !in 0..2) invalid("audio_method must be 0|1|2")
+                if (callAccess != null && callAccess !in 0..2) invalid("call_access must be 0|1|2")
+                val action: (GatewayRuntime) -> (() -> String) = { rt ->
+                    rt.applySettings { cur ->
+                        cur.copy(
+                            server = server ?: cur.server, port = port ?: cur.port,
+                            sipTransport = transport ?: cur.sipTransport, srtp = srtp ?: cur.srtp,
+                            username = user ?: cur.username, password = password ?: cur.password,
+                            domain = domain ?: cur.domain, inboundTarget = target ?: cur.inboundTarget,
+                            allowedPrefixes = prefixes ?: cur.allowedPrefixes,
+                            audioMethod = audioMethod ?: cur.audioMethod, callAccess = callAccess ?: cur.callAccess,
+                            holdSipWhenNotReady = holdSip ?: cur.holdSipWhenNotReady,
+                        )
+                    }
+                    rt::settingsLine
                 }
-                rt::settingsLine
+                action
             }
-            null -> throw IllegalArgumentException("missing --es op")
-            else -> throw IllegalArgumentException("unknown op '$op'")
+            else -> error("unreachable")
         }
     }
 
-    /** The runtime would otherwise drop an invalid edit silently on its own thread. */
-    private fun validateProvision(intent: Intent) {
-        fun intIn(key: String, range: IntRange) {
-            if (!intent.hasExtra(key)) return
-            // A non-int extra (e.g. --es) reads as the default.
-            require(intent.getIntExtra(key, Int.MIN_VALUE) in range) { "$key must be an --ei integer in $range" }
+    @Suppress("DEPRECATION") // Inspect types rather than letting Intent silently return defaults.
+    private inline fun <reified T> Intent.argument(name: String): T? {
+        if (!hasExtra(name)) return null
+        val value = extras?.get(name)
+        val flag = when (T::class) {
+            String::class -> "--es"
+            Int::class -> "--ei"
+            Boolean::class -> "--ez"
+            else -> error("unsupported argument type")
         }
-        intIn("port", 1..65535)
-        intIn("audio_method", 0..2)
-        intIn("call_access", 0..2)
+        if (value !is T) invalid("$name must use $flag")
+        return value
     }
+
+    private class InvalidArgument(message: String) : IllegalArgumentException(message)
+    private fun invalid(message: String): Nothing = throw InvalidArgument(message)
 
     /** Completes the pending broadcast exactly once, whichever of reply and timeout comes first. */
-    private class Reply(private val pending: PendingResult) {
+    private class Reply(private val pending: PendingResult, private val ordered: Boolean) {
         private val done = AtomicBoolean()
+        private var handler: Handler? = null
+        private var timeout: Runnable? = null
+
+        fun startTimeout(op: String) {
+            val callback = Runnable {
+                send(RESULT_TIMEOUT, "timeout: op '$op' queued or running after ${TIMEOUT_MS / 1000} s; check logs before retrying")
+            }
+            timeout = callback
+            handler = Handler(Looper.getMainLooper()).also { it.postDelayed(callback, TIMEOUT_MS) }
+        }
+
         fun send(code: Int, data: String) {
             if (!done.compareAndSet(false, true)) return
-            pending.setResult(code, data, null)
-            pending.finish()
+            timeout?.let { handler?.removeCallbacks(it) }
+            try {
+                if (ordered) pending.setResult(code, data, null)
+            } finally {
+                pending.finish()
+            }
+            if (code == RESULT_ERROR) AppLog.w("adb control: $data")
         }
     }
 

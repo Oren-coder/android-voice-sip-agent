@@ -37,9 +37,13 @@ adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 
 adb control (the receiver is guarded by the DUMP permission, so only the shell can send to it; **always write the
 fully-qualified component name** — `.AdbControlReceiver` resolves to a non-existent class and the broadcast is
-silently dropped). Every op replies after the `gateway-runtime` executor has processed it (≤5 s):
-`result=1` ok, `result=2` bad op/argument, `result=3` still queued; `data` is a one-line summary (status) or
-the effective settings (never the password). `result=0` with no data means the receiver was never reached:
+silently dropped). Replies wait up to 5 s for a `gateway-runtime` queue checkpoint:
+`result=1` acknowledges submission with observed state, `result=2` invalid input or submission/reporting
+failure, `result=3` queued or running without acknowledgement. Result 1 does not guarantee completion;
+worker exceptions, deferred changes and SIP registration are not tracked as command outcomes. `data`
+contains status or saved/queued selections (never the password). Check logcat or the in-app log before
+retrying errors/timeouts: submitted work is not cancelled. Unknown arguments and wrong types are rejected,
+including `--ez hold_sip`. `result=0` with no data is not an acknowledgement; check the component name:
 
 ```bash
 R=io.github.sparkcyf.voicesipagent/io.github.sparkcyf.voicesipagent.app.AdbControlReceiver

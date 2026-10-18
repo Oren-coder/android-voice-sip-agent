@@ -975,7 +975,8 @@ class GatewayRuntime private constructor(context: Context) {
 
     /**
      * Runs [block] on the runtime thread after every task queued so far, and after the tasks those
-     * queue in turn (one level), so a reply reflects the outcome of a just-submitted control.
+     * queue in turn (one level). This provides a state snapshot after dispatch, not a completion
+     * result: task exceptions, deferred changes and asynchronous registration are not tracked here.
      */
     internal fun afterQueued(block: () -> Unit) = worker.execute { worker.execute(block) }
 
@@ -992,7 +993,7 @@ class GatewayRuntime private constructor(context: Context) {
             " calls=${h.calls.summary}" + (if (h.settingsPending) " settingsPending" else "")
     }
 
-    /** Effective (queued if a call is active) settings, never the password itself. */
+    /** Saved or queued selections (not a verified audio route), never the password itself. */
     fun settingsLine(): String {
         val s = pendingSettings ?: settings
         return "stack=${s.sipStack.id} server=${s.server}:${s.port}/${s.sipTransport} srtp=${s.srtp}" +

@@ -137,9 +137,10 @@ adb shell am broadcast -n $R --es op provision --ei audio_method 2   # 0 Automat
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 
-每条命令都会返回结果，例如 `Broadcast completed: result=1, data="ok: ready=true (Gateway ready) …"`。
-`result=1` 表示已生效（设置类命令返回生效后的值，不含密码），`2` 表示操作或参数有误，`3` 表示 5 秒后仍在排队。
-`result=0` 且没有 data 说明广播根本没送达 App，请检查组件名。
+广播结果：`result=1` 表示确认接收，`2` 表示错误，`3` 表示等待 5 秒后超时。
+确认接收不代表操作已完成；变更可能等待当前通话结束后应用。重试前请查看 logcat 或 App 内日志。
+`result=0` 且没有 data 不代表命令已被接收，请检查组件名。
+未知参数和错误类型会被拒绝；请按示例使用对应的 extra 类型。
 
 日志中的电话号码只保留后两位；通话音频不会写入日志，也不会落盘。
 

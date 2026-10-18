@@ -150,10 +150,10 @@ adb shell am broadcast -n $R --es op provision --ei audio_method 2   # 0 Automat
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 
-Each command reports its outcome, e.g. `Broadcast completed: result=1, data="ok: ready=true (Gateway ready) …"`.
-`result=1` means applied (settings replies show the effective values, never the password), `2` a bad op or
-argument, and `3` that the change is still queued after 5 s. `result=0` with no data means the broadcast never
-reached the app: check the component name.
+Replies use `result=1` for acknowledgement, `2` for errors, and `3` for a five-second timeout.
+Acknowledgement does not guarantee completion; changes may wait until calls end. Check logcat or the
+in-app log before retrying. `result=0` with no data is not an acknowledgement: check the component name.
+Unknown arguments and wrong types are rejected; use the extra types shown in the examples.
 
 Phone numbers are logged with only their last two digits; call audio is never logged or stored.
 
