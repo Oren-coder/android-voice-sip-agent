@@ -32,6 +32,11 @@ available while they wait. Stopping an endpoint cancels pending account creation
 teardown is queued on the same worker before replacement startup; an outstanding initialization or
 DNS lookup is not interrupted, so native cleanup can finish after the gateway controls return.
 
+An unexpected PJSIP event-loop exception marks SIP unavailable and ends its local call legs, allowing
+the gateway to release the cellular call and audio. Deferred native wrappers are deleted on their owner
+thread before library destruction. Ordinary command failures only log. Takeover and dialer ownership
+remain unchanged; use **Reconnect SIP** or turn takeover off/on to start a new library lifetime.
+
 On Android 11, turn **Take over calls** on (or tap **Enable takeover**) to grant default-dialer call access.
 With Shizuku connected, this saves your previous dialer and changes the role directly, without the
 system role dialog. Changes wait for current calls to end and can be cancelled while waiting.

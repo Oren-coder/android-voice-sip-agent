@@ -148,6 +148,10 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     library teardown there, after outstanding initialization/DNS and before replacement startup.
     Teardown drains deferred wrapper deletions and destroys the native library on the `pjsua` thread.
     Native cleanup can finish after gateway controls return; initialization/DNS is not interrupted.
+    An unexpected event-loop exception reports SIP unavailable and ends local SIP legs with NETWORK_ERROR.
+    Accepted controls and deferred wrapper deletions drain on the owner thread before native destruction;
+    queued account creation is skipped after failure. Ordinary task exceptions only log. Takeover and dialer
+    ownership remain unchanged; use Reconnect SIP or off/on to recover (no automatic library restart).
     Its timers, event thread, sockets, and null-device clock then stop; switch-on creates a new library
     lifetime. Physical off/on cycling remains a device validation check.
   - **No Android sound-device backend is compiled in** — only the null sound device, so pjsua never touches

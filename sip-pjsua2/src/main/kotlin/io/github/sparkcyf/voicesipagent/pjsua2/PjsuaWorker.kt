@@ -12,6 +12,8 @@ internal class PjsuaWorker(
     private val poll: () -> Unit,
     private val release: () -> Unit,
     private val onFailure: (Throwable) -> Unit,
+    /** Runs on the owner thread before deferred cleanup and native destruction. */
+    private val onTerminated: (Throwable) -> Unit = onFailure,
 ) {
     private class Session {
         val queue = LinkedBlockingQueue<() -> Unit>()
@@ -29,8 +31,11 @@ internal class PjsuaWorker(
     fun start() = synchronized(lock) {
         session?.let {
             if (it.thread.isAlive) {
-                check(!it.stopping) { "pjsua2 is shutting down" }
-                return@synchronized
+                if (!it.stopping) return@synchronized
+                // A manual restart can arrive while failure cleanup is still destroying the library.
+                check(Thread.currentThread() !== it.thread) { "cannot restart pjsua2 inside its callback" }
+                it.thread.join(5000)
+                check(!it.thread.isAlive) { "pjsua2 shutdown did not complete" }
             }
             session = null
         }
@@ -42,18 +47,21 @@ internal class PjsuaWorker(
                 try { initialize() } catch (t: Throwable) { failure = t; return@Thread }
                 finally { ready.countDown() }
                 while (true) {
-                    while (true) {
-                        val task = current.queue.poll() ?: break
-                        try { task() } catch (t: Throwable) { onFailure(t) }
-                    }
+                    drain(current)
                     if (current.stopping && current.queue.isEmpty()) break
                     poll()
                 }
-            } catch (t: Throwable) { onFailure(t) }
+            } catch (t: Throwable) {
+                beginStop(current)
+                onTerminated(t)
+            }
             finally {
-                current.stopping = true
-                current.timers.shutdownNow()
-                try { release() } catch (t: Throwable) { onFailure(t) }
+                beginStop(current)
+                // A failed poll may already have queued wrapper deletions from native callbacks.
+                // The termination handler also ends calls and queues their remaining cleanup.
+                try { drain(current) } finally {
+                    try { release() } catch (t: Throwable) { onFailure(t) }
+                }
             }
         }, "pjsua").apply { isDaemon = true; priority = Thread.MAX_PRIORITY - 1 }
         session = current
@@ -66,15 +74,28 @@ internal class PjsuaWorker(
         }
     }
 
-    private fun enqueue(current: Session, task: () -> Unit) {
-        // Native callbacks may enqueue object deletion during shutdown. Drain those on their own
-        // thread, while ignoring late external callbacks and timer work from the previous lifetime.
-        synchronized(current) {
-            if (session === current && (!current.stopping || Thread.currentThread() === current.thread)) current.queue.add(task)
+    private fun drain(current: Session) {
+        while (true) {
+            val task = current.queue.poll() ?: return
+            try { task() } catch (t: Throwable) { onFailure(t) }
         }
     }
 
-    fun post(task: () -> Unit) { session?.let { enqueue(it, task) } }
+    private fun beginStop(current: Session) = synchronized(current) {
+        current.stopping = true
+        current.timers.shutdownNow()
+    }
+
+    private fun enqueue(current: Session, task: () -> Unit): Boolean {
+        // Native callbacks may enqueue object deletion during shutdown. Drain those on their own
+        // thread, while ignoring late external callbacks and timer work from the previous lifetime.
+        return synchronized(current) {
+            if (session === current && (!current.stopping || Thread.currentThread() === current.thread)) current.queue.add(task)
+            else false
+        }
+    }
+
+    fun post(task: () -> Unit): Boolean = session?.let { enqueue(it, task) } ?: false
 
     fun schedule(delay: Long, task: () -> Unit): ScheduledFuture<*> {
         val current = session ?: error("pjsua2 stopped")
@@ -90,7 +111,7 @@ internal class PjsuaWorker(
     fun stop() {
         val current = session ?: return
         check(Thread.currentThread() !== current.thread) { "cannot stop pjsua2 inside its callback" }
-        synchronized(current) { current.stopping = true; current.timers.shutdownNow() }
+        beginStop(current)
         current.thread.join(5000)
         check(!current.thread.isAlive) { "pjsua2 shutdown did not complete" }
         check(current.timers.awaitTermination(1, TimeUnit.SECONDS)) { "pjsua2 timer shutdown did not complete" }

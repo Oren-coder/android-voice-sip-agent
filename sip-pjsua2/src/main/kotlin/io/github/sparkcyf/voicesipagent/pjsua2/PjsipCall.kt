@@ -237,22 +237,28 @@ internal class PjsipCall(
         }
     }
 
+    internal fun failForWorkerLoss() = finish(HangupCause.NETWORK_ERROR)
+
     private fun finish(cause: HangupCause) {
         ringTimer?.cancel(false)
         val c = call
         call = null
-        if (c != null) owner.calls.remove(c.id)
-        transition(LegState.ENDED, cause)
-        log.info("call $id media ${port.stats()}")
+        // Also used after a worker failure; avoid a JNI lookup merely to remove the leg.
+        owner.calls.values.remove(this)
         // Defer deletes: we may be inside a callback of exactly these objects.
         val cp = conf
         val am = peer
         conf = null
         peer = null
-        PjsuaLib.post {
-            am?.delete()
-            cp?.delete()
-            c?.delete()
+        try {
+            transition(LegState.ENDED, cause)
+            log.info("call $id media ${port.stats()}")
+        } finally {
+            PjsuaLib.post {
+                try { am?.delete() } finally {
+                    try { cp?.delete() } finally { c?.delete() }
+                }
+            }
         }
     }
 

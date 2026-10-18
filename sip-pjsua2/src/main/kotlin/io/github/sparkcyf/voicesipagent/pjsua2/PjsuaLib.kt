@@ -12,6 +12,7 @@ import org.pjsip.pjsua2.pjsip_transport_type_e
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.Base64
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.ScheduledFuture
 
 /**
@@ -30,7 +31,9 @@ internal object PjsuaLib {
     private const val ACTIVE_POLL_MS = 10L
     private val DIGITS = Regex("\\d{5,}")
 
-    private val worker = PjsuaWorker(::init, ::poll, ::release) { log.warn("pjsua task failed", it) }
+    private val worker = PjsuaWorker(::init, ::poll, ::release,
+        onFailure = { log.warn("pjsua task failed", it) }, onTerminated = ::workerTerminated)
+    private val failureListeners = CopyOnWriteArraySet<(Throwable) -> Unit>()
     @Volatile var log: PjsipLog = PjsipLog.Silent
 
     /** pjsip's own info-level (3) lines; errors and warnings (1-2) always pass. */
@@ -44,6 +47,26 @@ internal object PjsuaLib {
 
     val running: Boolean get() = worker.running
 
+    /** Subscribe immediately after ensureStarted, before DNS or account creation. */
+    fun addFailureListener(listener: (Throwable) -> Unit): Boolean {
+        failureListeners.add(listener)
+        if (running) return true
+        // Do not miss an exit that raced initialization/subscription. No account exists yet.
+        failureListeners.remove(listener)
+        return false
+    }
+
+    fun removeFailureListener(listener: (Throwable) -> Unit) { failureListeners.remove(listener) }
+
+    private fun workerTerminated(failure: Throwable) {
+        log.warn("pjsua worker terminated", failure)
+        val listeners = failureListeners.toList()
+        failureListeners.clear()
+        listeners.forEach { listener ->
+            runCatching { listener(failure) }.onFailure { log.warn("SIP failure cleanup failed", it) }
+        }
+    }
+
     /** Loads and initialises the library on first use. Throws if that fails. */
     @Synchronized
     fun ensureStarted(log: PjsipLog) {
@@ -51,7 +74,9 @@ internal object PjsuaLib {
         worker.start()
     }
 
-    fun post(task: () -> Unit) = worker.post(task)
+    fun post(task: () -> Unit) { worker.post(task) }
+
+    fun tryPost(task: () -> Unit): Boolean = worker.post(task)
 
     fun schedule(delayMs: Long, task: () -> Unit): ScheduledFuture<*> =
         worker.schedule(delayMs, task)

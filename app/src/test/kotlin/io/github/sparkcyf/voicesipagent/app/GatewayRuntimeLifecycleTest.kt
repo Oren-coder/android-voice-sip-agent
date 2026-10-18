@@ -39,6 +39,34 @@ import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 class GatewayRuntimeLifecycleTest {
+    @Test fun sipWorkerFailureClearsReadinessAndPreservesTakeoverUntilExplicitReconnect(): Unit =
+        Fixture(enabled = true, holder = "gateway", healthy = true).use { f ->
+            f.connect()
+            f.sipStatus(EndpointStatus(true, "registered"))
+            assertTrue(f.runtime.health.value.cellularReady)
+            val oldEndpoint = f.endpoints.constructed().single()
+            val oldListener = f.sipListener!!
+
+            val failure = EndpointStatus(false, "SIP worker failed: poll failed")
+            f.sipStatus(failure)
+
+            assertFalse(f.runtime.health.value.cellularReady)
+            assertEquals(failure, f.runtime.health.value.sip)
+            assertTrue(f.runtime.settings.takeover)
+            assertTrue(f.runtime.health.value.holdsDialer)
+            verify(f.runtime.cellular).setReadiness(false, "SIP unavailable: ${failure.detail}")
+            assertEquals(1, f.endpoints.constructed().size)
+            verify(f.helper, never()).restoreDefaultDialer(anyString())
+
+            f.runtime.restartSip()
+            f.drain()
+            assertEquals(2, f.endpoints.constructed().size)
+            f.sipStatus(EndpointStatus(true, "registered again"))
+            oldListener.onStatusChanged(oldEndpoint, failure)
+            f.drain()
+            assertTrue(f.runtime.health.value.cellularReady)
+        }
+
     @Test fun switchOnCapturesDialerBeforeHelperConnects() {
         for (initialHolder in listOf("phone", null)) {
             Fixture(holder = initialHolder).use { f ->
@@ -370,7 +398,8 @@ class GatewayRuntimeLifecycleTest {
             private set
         private var listener: ShizukuConnector.Listener? = null
         private var helperState = ShizukuConnector.State.STOPPED
-        private var sipListener: EndpointStatusListener? = null
+        var sipListener: EndpointStatusListener? = null
+            private set
         lateinit var dialPolicy: DialPolicy
             private set
         val context = mock(Context::class.java)

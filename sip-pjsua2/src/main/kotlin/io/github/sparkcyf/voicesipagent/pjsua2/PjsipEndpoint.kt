@@ -23,6 +23,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -48,6 +49,8 @@ class PjsipEndpoint(
     private var serverAddrs: Set<InetAddress> = emptySet()
     private var rtpCheck: ScheduledFuture<*>? = null
     @Volatile private var stopped = false
+    private val workerFailed = AtomicBoolean()
+    private val failureListener: (Throwable) -> Unit = ::onWorkerFailure
     private var unregistered = false
 
     private val hostPort = if (config.port == config.transport.defaultPort) config.server else "${config.server}:${config.port}"
@@ -63,18 +66,29 @@ class PjsipEndpoint(
 
     /** Starts asynchronously so native initialization and DNS cannot block gateway controls. */
     fun start() {
+        if (stopped || workerFailed.get()) return
         setStatus(EndpointStatus(false, "registering"))
         startup.execute {
             if (stopped) return@execute
             try {
                 PjsuaLib.ensureStarted(log)
-                if (stopped) return@execute
+                if (!PjsuaLib.addFailureListener(failureListener)) {
+                    onWorkerFailure(IllegalStateException("worker stopped during startup"))
+                    return@execute
+                }
+                if (stopped || workerFailed.get()) {
+                    PjsuaLib.removeFailureListener(failureListener)
+                    return@execute
+                }
                 val addrs = runCatching { InetAddress.getAllByName(config.server).toSet() }
                     .onFailure { log.warn("cannot resolve ${config.server}: ${it.message}") }
                     .getOrDefault(emptySet())
-                if (stopped) return@execute
-                PjsuaLib.post {
-                    if (stopped) return@post
+                if (stopped || workerFailed.get()) {
+                    PjsuaLib.removeFailureListener(failureListener)
+                    return@execute
+                }
+                val accepted = PjsuaLib.tryPost {
+                    if (stopped || workerFailed.get()) return@tryPost
                     serverAddrs = addrs
                     try {
                         createAccount()
@@ -85,6 +99,7 @@ class PjsipEndpoint(
                         setStatus(EndpointStatus(false, "setup failed: ${e.message}"))
                     }
                 }
+                if (!accepted) onWorkerFailure(IllegalStateException("worker stopped during startup"))
             } catch (e: Throwable) {
                 log.warn("SIP start failed", e)
                 setStatus(EndpointStatus(false, "start failed: ${e.message}"))
@@ -116,9 +131,32 @@ class PjsipEndpoint(
                     try { acc.shutdown() } finally { acc.delete(); account = null }
                 }
                 if (releaseTransport) PjsuaLib.closeTransport(config.transport, config.localPort)
-            } finally { done.countDown() }
+            } finally {
+                PjsuaLib.removeFailureListener(failureListener)
+                done.countDown()
+            }
         }
         done.await(timeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    /** Owner thread, or startup before an account exists if the worker already exited. */
+    internal fun onWorkerFailure(failure: Throwable) {
+        if (!workerFailed.compareAndSet(false, true)) return
+        try {
+            setStatus(EndpointStatus(false, "SIP worker failed: ${PjsuaLib.redact(failure.message.orEmpty())}"))
+        } finally {
+            rtpCheck?.cancel(false)
+            calls.values.toList().forEach { leg ->
+                runCatching { leg.failForWorkerLoss() }.onFailure { log.warn("call failure cleanup failed", it) }
+            }
+            calls.clear()
+            val acc = account
+            account = null
+            // Call wrappers must be deleted before their account, outside any native callback.
+            if (acc != null) PjsuaLib.post {
+                try { acc.shutdown() } finally { acc.delete() }
+            }
+        }
     }
 
     /** Network changed: pjsua rebinds, re-registers and re-INVITEs active calls with the new address. */
@@ -183,15 +221,21 @@ class PjsipEndpoint(
             leg.doHangup(HangupCause.INTERNAL_ERROR)
             return leg
         }
-        PjsuaLib.post {
-            if (stopped) leg.doHangup(HangupCause.UNAVAILABLE) else leg.startOutbound(target, caller)
+        val accepted = PjsuaLib.tryPost {
+            when {
+                workerFailed.get() -> leg.failForWorkerLoss()
+                stopped -> leg.doHangup(HangupCause.UNAVAILABLE)
+                else -> leg.startOutbound(target, caller)
+            }
         }
+        // Rejected work never created native resources; finish on the caller without touching calls.
+        if (!accepted) leg.doHangup(HangupCause.NETWORK_ERROR)
         return leg
     }
 
     @Synchronized
     private fun setStatus(s: EndpointStatus) {
-        if ((stopped && s != STOPPED) || s == status) return
+        if ((stopped && s != STOPPED) || (workerFailed.get() && s.ready) || s == status) return
         status = s
         statusListeners.forEach { it.onStatusChanged(this, s) }
     }
@@ -199,6 +243,7 @@ class PjsipEndpoint(
     // ------------------------------------------------------------ pjsua callbacks
 
     private fun onRegState(prm: OnRegStateParam) {
+        if (workerFailed.get()) return
         if (stopped) {
             if (prm.code / 100 == 2 && prm.expiration == 0L) unregistered = true
             return
@@ -223,7 +268,7 @@ class PjsipEndpoint(
         val handler = incomingHandler
         val refuse = when {
             config.acceptOnlyFromServer && !fromServer(src) -> 403
-            handler == null || stopped -> 480
+            handler == null || stopped || workerFailed.get() -> 480
             else -> 0
         }
         if (refuse != 0) {
