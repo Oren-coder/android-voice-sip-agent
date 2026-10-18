@@ -13,6 +13,7 @@ import android.content.Intent
  *   ... --es op sip-stack --es stack pjsua2|builtin
  *   ... --es op provision --es server sip.example.org --ei port 5061 --es transport tls --es domain sip.example.org [--es srtp optional]
  *   ... --es op sip-debug --ez on true      (pjsip info-level logs; off by default)
+ *   ... --es op provision --ez hold_sip false  (keep SIP registered while the cellular side is not ready)
  */
 class AdbControlReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -44,6 +45,7 @@ class AdbControlReceiver : BroadcastReceiver() {
                         allowedPrefixes = intent.getStringExtra("prefixes") ?: cur.allowedPrefixes,
                         audioMethod = intent.getIntExtra("audio_method", cur.audioMethod),
                         callAccess = intent.getIntExtra("call_access", cur.callAccess),
+                        holdSipWhenNotReady = intent.getBooleanExtra("hold_sip", cur.holdSipWhenNotReady),
                     )
                 }
             }

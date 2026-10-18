@@ -170,6 +170,10 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   Service destruction queues the same resource cleanup as switch-off, cancels pending role changes, and
   never acquires/restores a role or immediately restarts itself. A service token prevents an old destruction
   callback from stopping a replacement service. Telecom observation and role recovery UI remain available.
+  `SipRegistrationGate` (setting `holdSipWhenNotReady`, default on) keeps SIP unregistered while the
+  cellular side minus SIP itself is not ready: held from each gateway start until first ready, then only
+  after a 45 s grace period; readiness re-registers at once. Hold changes go through `startSip()`/`stopSip()`
+  (pjsua2 keeps library and transport) and are deferred while calls or a bridge session exist.
   While takeover is enabled and the service is foreground, a health check runs every 60 s and re-runs setup while idle if
   companion mode is selected, and call access is unavailable. The override alone does not gate readiness;
   health checks never request the dialer role.
