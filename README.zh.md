@@ -78,6 +78,7 @@ Android 11 的兼容性尚未经过真机验证；其他机型的隐藏 API 和�
 | User / password | PBX 上 trunk 的凭据 |
 | Cellular inbound → SIP target | 蜂窝来电时在 PBX 上呼叫的 DID；留空则使用 SIP 用户名 |
 | Allowed dial-out prefixes | 逗号分隔；留空表示允许拨出任何号码 |
+| Unregister while the phone cannot take calls | 开启（默认）：蜂窝侧未就绪（Shizuku、通话接入或通话音频缺失）时保持 SIP 账号未注册，让 PBX 看到 trunk 不可用并转移。问题持续 45 秒后才注销；通话期间从不改变注册；手机恢复就绪后立即重新注册。启动或打开开关后，只有手机就绪才注册。 |
 
 点击 **Save & apply** 保存；通话中提交的修改会等待当前通话结束后生效。
 接管关闭时保存的 SIP 设置将在下次开启接管时使用。
@@ -123,6 +124,7 @@ adb shell am broadcast -n $R --es op earpiece-mute --ez on true
 adb shell am broadcast -n $R --es op sip-stack --es stack pjsua2
 adb shell am broadcast -n $R --es op loopback --ez on true   # 回声测试：蜂窝来电直接回声
 adb shell am broadcast -n $R --es op sip-debug --ez on true  # pjsip 详细日志
+adb shell am broadcast -n $R --es op provision --ez hold_sip false   # 未就绪时也保持注册
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 

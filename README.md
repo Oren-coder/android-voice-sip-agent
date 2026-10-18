@@ -87,6 +87,7 @@ The handset microphone stays muted while bridging, so local listening does not e
 | User / password | Trunk credentials on the PBX |
 | Cellular inbound → SIP target | DID dialed on the PBX for incoming cellular calls; blank = the SIP user name |
 | Allowed dial-out prefixes | Comma-separated; empty = any number may be dialed out |
+| Unregister while the phone cannot take calls | On (default): keeps the SIP account unregistered while the cellular side is not ready (Shizuku, call access or call audio missing), so the PBX sees the trunk unavailable and can fail over. A problem must last 45 s before unregistering; registration is never changed during calls and resumes as soon as the phone is ready. After startup or switch-on, SIP registers only once the phone is ready. |
 
 Tap **Save & apply**; changes wait for current calls to end. With takeover off, saved SIP settings are
 used when takeover is next enabled.
@@ -134,6 +135,7 @@ adb shell am broadcast -n $R --es op earpiece-mute --ez on true
 adb shell am broadcast -n $R --es op sip-stack --es stack pjsua2
 adb shell am broadcast -n $R --es op loopback --ez on true   # echo incoming cellular calls (test mode)
 adb shell am broadcast -n $R --es op sip-debug --ez on true  # verbose pjsip logging
+adb shell am broadcast -n $R --es op provision --ez hold_sip false   # stay registered while not ready
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 

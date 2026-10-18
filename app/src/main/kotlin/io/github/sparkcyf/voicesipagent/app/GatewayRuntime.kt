@@ -6,6 +6,7 @@ import android.net.LinkProperties
 import android.net.Network
 import android.os.Bundle
 import android.os.Build
+import android.os.SystemClock
 import android.telecom.TelecomManager
 import android.content.ComponentName
 import android.content.pm.PackageManager
@@ -155,6 +156,11 @@ class GatewayRuntime private constructor(context: Context) {
     private var dialerRetry: ScheduledFuture<*>? = null
     private var healthCheck: ScheduledFuture<*>? = null
     private var audioStatusCheck: ScheduledFuture<*>? = null
+    private val sipGate = SipRegistrationGate(SIP_HOLD_GRACE_MS) { SystemClock.elapsedRealtime() }
+    private var sipHoldCheck: ScheduledFuture<*>? = null
+    private var sipHoldCheckAt: Long? = null
+    /** Why SIP is currently held unregistered by [startSip]; null while it may register. */
+    @Volatile private var sipHeld: String? = null
     @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val dialerHandoffStore = DialerHandoffStore(app)
     private val dialerHandoff = DialerHandoff(app.packageName, dialerHandoffStore, object : DialerHandoff.Backend {
@@ -267,6 +273,9 @@ class GatewayRuntime private constructor(context: Context) {
         stopBackgroundTasks()
         runCatching { stopBridge() }.onFailure { AppLog.w("bridge cleanup failed", it) }
         runCatching { stopSip(releaseLibrary = true) }.onFailure { AppLog.w("SIP cleanup failed", it) }
+        sipGate.reset()
+        sipHeld = null
+        scheduleSipHoldCheck(null)
         audioOpener.closeForShutdown()
         shizuku.service?.let { svc ->
             runCatching { svc.setupCallAccess(app.packageName, false, _health.value.effectiveCallAccess) }
@@ -419,7 +428,11 @@ class GatewayRuntime private constructor(context: Context) {
             (info as android.content.pm.ServiceInfo).permission == Manifest.permission.BIND_INCALL_SERVICE)
     }.getOrDefault(false)
 
-    private fun updateReadiness() {
+    private class CellularCheck(val access: Boolean, val audio: Boolean, val accessProblem: String?,
+        /** Why the cellular side cannot carry gateway calls, ignoring SIP; null when it can. */
+        val problem: String?)
+
+    private fun checkCellular(): CellularCheck {
         refreshRoleState()
         val h = _health.value
         val p = h.privileged
@@ -437,6 +450,22 @@ class GatewayRuntime private constructor(context: Context) {
             AudioMethod.LEGACY -> p?.get(HealthKeys.DIRECT_AUDIO) == true
             else -> p?.get(HealthKeys.DIRECT_AUDIO) == true || p?.get(HealthKeys.REDIRECT_AUDIO) == true
         }
+        val problem = when {
+            h.dialerChangeRunning -> "Changing the default dialer"
+            !gatewayEnabled -> "Gateway service not running"
+            !access -> requirements.problem!!
+            h.shizuku != ShizukuConnector.State.CONNECTED -> "Shizuku not connected"
+            !audio -> "Selected call audio unavailable: ${h.privilegedDetail}"
+            else -> null
+        }
+        return CellularCheck(access, audio, requirements.problem, problem)
+    }
+
+    private fun updateReadiness() {
+        val c = checkCellular()
+        val h = _health.value
+        val access = c.access
+        val audio = c.audio
         val detail = when {
             h.dialerChangeRunning -> "Changing the default dialer"
             h.takeoverOnPending -> "Enabling gateway after current calls end"
@@ -445,18 +474,72 @@ class GatewayRuntime private constructor(context: Context) {
                 "Waiting to become the default dialer" else "Waiting to restore the previous dialer"
             !h.takeover -> if (h.holdsDialer) "Gateway off; this app still holds the dialer role" else "Gateway off"
             !gatewayEnabled -> "Gateway service not running"
-            !access -> requirements.problem!!
+            !access -> c.accessProblem!!
             h.shizuku != ShizukuConnector.State.CONNECTED -> "Shizuku not connected"
             !audio -> "Selected call audio unavailable: ${h.privilegedDetail}"
             !h.loopbackTest && !h.sip.ready -> "SIP unavailable: ${h.sip.detail}"
             else -> "Gateway ready"
         }
-        val ready = !h.dialerChangeRunning && gatewayEnabled && access && audio && h.shizuku == ShizukuConnector.State.CONNECTED &&
-            (h.loopbackTest || h.sip.ready)
+        val ready = c.problem == null && (h.loopbackTest || h.sip.ready)
         _health.update { it.copy(gatewayRunning = gatewayEnabled, callAccessReady = access,
             audioReady = audio, cellularReady = ready, readinessDetail = detail) }
         cellular.setReadiness(ready, detail)
+        updateSipHold(c.problem)
         syncForegroundService()
+    }
+
+    // ------------------------------------------------------------ SIP registration hold
+
+    /**
+     * Whether SIP should stay unregistered because the cellular side is not ready (SIP itself is
+     * not part of that readiness), and why. Also schedules the grace-period recheck.
+     */
+    private fun sipHoldReason(problem: String?): String? {
+        val s = settings
+        val d = sipGate.evaluate(active = gatewayEnabled && s.takeover && s.sipConfigured && s.holdSipWhenNotReady,
+            ready = problem == null)
+        scheduleSipHoldCheck(d.recheckAtMs)
+        return if (d.hold) problem ?: "cellular side not ready" else null
+    }
+
+    private fun scheduleSipHoldCheck(atMs: Long?) {
+        if (atMs == sipHoldCheckAt) return
+        sipHoldCheck?.cancel(false)
+        sipHoldCheck = null
+        sipHoldCheckAt = atMs
+        if (atMs == null) return
+        val delay = (atMs - SystemClock.elapsedRealtime()).coerceAtLeast(0)
+        sipHoldCheck = worker.schedule({
+            sipHoldCheck = null
+            sipHoldCheckAt = null
+            updateReadiness()
+        }, delay, TimeUnit.MILLISECONDS)
+    }
+
+    private fun heldStatus(reason: String) = EndpointStatus(false, "held unregistered: $reason")
+
+    /** Called from [updateReadiness]; registration changes run as a separate task, never nested. */
+    private fun updateSipHold(problem: String?) {
+        val reason = sipHoldReason(problem)
+        when {
+            (reason != null) != (sipHeld != null) -> worker.execute(::applySipHold)
+            reason != null && reason != sipHeld -> {
+                sipHeld = reason
+                _health.update { it.copy(sip = heldStatus(reason)) }
+            }
+        }
+    }
+
+    /** Calls and bridge sessions keep the current registration; call-end handling re-evaluates. */
+    private fun applySipHold() {
+        if (!gatewayEnabled || hasActiveWork()) return
+        val reason = sipHoldReason(checkCellular().problem)
+        if ((reason != null) == (sipHeld != null)) return
+        AppLog.i(if (reason != null) "unregistering SIP: $reason" else "cellular side ready; registering SIP")
+        startSip()
+        // The echo test bridge does not use SIP; keep it and any session it carries.
+        if (!_health.value.loopbackTest) rebuildBridge()
+        updateReadiness()
     }
 
     private fun syncForegroundService() {
@@ -574,6 +657,7 @@ class GatewayRuntime private constructor(context: Context) {
     private fun startSip() {
         if (!gatewayEnabled) return
         stopSip()
+        sipHeld = null
         val s = settings
         if (!s.takeover) {
             _health.update { it.copy(sip = EndpointStatus(false, "takeover off")) }
@@ -581,6 +665,13 @@ class GatewayRuntime private constructor(context: Context) {
         }
         if (!s.sipConfigured) {
             _health.update { it.copy(sip = EndpointStatus(false, "not configured")) }
+            return
+        }
+        sipHoldReason(checkCellular().problem)?.let { reason ->
+            // stopSip() above waited for the un-REGISTER and kept the pjsua2 transport for the next start.
+            sipHeld = reason
+            AppLog.i("SIP held unregistered: $reason")
+            _health.update { it.copy(sip = heldStatus(reason)) }
             return
         }
         val transport = SipTransport.of(s.sipTransport)
@@ -780,7 +871,7 @@ class GatewayRuntime private constructor(context: Context) {
         AppLog.i("settings saved ($new)")
         val platformOnly = old.copy(audioMethod = new.audioMethod, callAccess = new.callAccess,
             muteEarpiece = new.muteEarpiece, sipDebugLog = new.sipDebugLog,
-            keepDefaultDialer = new.keepDefaultDialer) == new
+            keepDefaultDialer = new.keepDefaultDialer, holdSipWhenNotReady = new.holdSipWhenNotReady) == new
         PjsipEndpoint.setVerboseLogging(new.sipDebugLog)
         if (!platformOnly) { startSip(); rebuildBridge() }
         configureCallAccess()
@@ -810,6 +901,14 @@ class GatewayRuntime private constructor(context: Context) {
     fun setKeepDefaultDialer(on: Boolean) = worker.execute {
         settingsStore.save(settings.copy(keepDefaultDialer = on).also { _settings.value = it })
         pendingSettings = pendingSettings?.copy(keepDefaultDialer = on)
+    }
+
+    /** Re-evaluated at once; a resulting (un)registration waits until calls end. */
+    fun setHoldSipWhenNotReady(on: Boolean) = worker.execute {
+        settingsStore.save(settings.copy(holdSipWhenNotReady = on).also { _settings.value = it })
+        pendingSettings = pendingSettings?.copy(holdSipWhenNotReady = on)
+        AppLog.i("hold SIP while cellular not ready ${if (on) "on" else "off"}")
+        updateReadiness()
     }
 
     /** The master switch. Switching off mid-call waits for that call to end. */
@@ -876,6 +975,7 @@ class GatewayRuntime private constructor(context: Context) {
             appendLine("privileged=${h.privileged} ${h.privilegedDetail}")
             appendLine("sip=${h.sip.detail} ready=${h.sip.ready} stack=${settings.sipStack.id} " +
                 "transport=${settings.sipTransport} srtp=${settings.srtp} debugLog=${settings.sipDebugLog}")
+            appendLine("sipHoldWhenNotReady=${settings.holdSipWhenNotReady} held=${sipHeld ?: "no"}")
             appendLine("cellular=${cellular.status.detail} inCallServiceBound=${CellularEndpoint.isInCallServiceBound} " +
                 "service=${CellularEndpoint.boundServiceDescription ?: "none"}")
             appendLine("sdk=${Build.VERSION.SDK_INT} callAccess=${settings.callAccess} effective=${h.effectiveCallAccess} " +
@@ -890,6 +990,9 @@ class GatewayRuntime private constructor(context: Context) {
 
     companion object {
         @Volatile private var instance: GatewayRuntime? = null
+
+        /** Outlasts brief Shizuku reconnects; shorter than a typical PBX qualify/failover window. */
+        internal const val SIP_HOLD_GRACE_MS = 45_000L
 
         internal fun newWorker() = ScheduledThreadPoolExecutor(1) { task ->
             Thread(task, "gateway-runtime").apply { isDaemon = true }
