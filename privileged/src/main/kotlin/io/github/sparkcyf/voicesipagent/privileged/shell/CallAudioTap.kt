@@ -99,7 +99,7 @@ internal class CallAudioTap(
             result = pfd
             Os.close(app)
             running = true
-            if (usedMethod == "direct") startDirectRecordWithFallback() else startRecord()
+            startRecord()
             startTrack()
             downThread = Thread(::downLoop, "tap-down").apply { priority = Thread.MAX_PRIORITY; start() }
             upThread = Thread(::upLoop, "tap-up").apply { priority = Thread.MAX_PRIORITY; start() }
@@ -170,36 +170,41 @@ internal class CallAudioTap(
     }
 
     /**
-     * Some HALs (e.g. OnePlus 6, Android 11) refuse VOICE_DOWNLINK at the bridge rate. Try other
-     * rates, then VOICE_CALL (which also carries the uplink), keeping the first that starts.
+     * Some HALs (e.g. OnePlus 6, Android 11) refuse to create or start VOICE_DOWNLINK at the bridge
+     * rate. Try other rates, then VOICE_CALL (which also carries the uplink); the first record that
+     * both initializes and starts is kept, already recording.
      */
     @SuppressLint("MissingPermission")
-    private fun startDirectRecordWithFallback() {
-        val first = runCatching { startRecord() }.exceptionOrNull() ?: return
-        val tried = mutableListOf("VOICE_DOWNLINK@$rate: ${describe(first)}")
+    private fun openDirectRecordWithFallback(): AudioRecord {
         val dl = MediaRecorder.AudioSource.VOICE_DOWNLINK
         val call = MediaRecorder.AudioSource.VOICE_CALL
-        val candidates = listOf(dl to 48000, dl to 8000, call to rate, call to 48000, call to 8000)
-            .filter { (src, r) -> !(src == dl && r == rate) && (r == rate || r % rate == 0 || rate % r == 0) }
+        val candidates = listOf(dl to rate, dl to 48000, dl to 8000, call to rate, call to 48000, call to 8000)
+            .distinct().filter { (_, r) -> r == rate || r % rate == 0 || rate % r == 0 }
+        val tried = ArrayList<String>()
         for ((src, r) in candidates) {
-            runCatching { record.stop() }
-            runCatching { record.release() }
-            SystemClock.sleep(RECOVERY_SETTLE_MS)
             val name = "${if (src == dl) "VOICE_DOWNLINK" else "VOICE_CALL"}@$r"
+            var created: AudioRecord? = null
             val failure = runCatching {
-                record = createLegacyRecord(src, r)
-                recSource = src
-                recRate = r
-                startRecord()
+                created = createLegacyRecord(src, r)
+                created!!.startRecording()
+                check(created!!.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "did not start" }
             }.exceptionOrNull()
             if (failure == null) {
-                Log.i(TAG, "capture fallback: using $name after ${tried.joinToString("; ")}")
-                note("capture fallback to $name")
-                return
+                recSource = src
+                recRate = r
+                if (tried.isNotEmpty()) {
+                    Log.i(TAG, "capture fallback: using $name after ${tried.joinToString("; ")}")
+                    note("capture fallback to $name")
+                }
+                return created!!
             }
+            Log.w(TAG, "capture attempt $name failed: ${describe(failure)}")
             tried += "$name: ${describe(failure)}"
+            runCatching { created?.stop() }
+            runCatching { created?.release() }
+            SystemClock.sleep(RECOVERY_SETTLE_MS)
         }
-        throw IllegalStateException("no capture configuration started: ${tried.joinToString("; ")}")
+        throw IllegalStateException("no capture configuration: ${tried.joinToString("; ")}")
     }
 
     /** Converts one captured frame at [recRate] to [rate] (integer ratios only). */
@@ -297,7 +302,7 @@ internal class CallAudioTap(
     /** AirSIM-style fallback for devices without the official interception API. */
     @SuppressLint("MissingPermission")
     private fun openLegacy() {
-        record = createLegacyRecord()
+        record = openDirectRecordWithFallback()
         try {
             val minTrack = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             check(minTrack > 0) { "track buffer size $minTrack at $rate Hz" }
