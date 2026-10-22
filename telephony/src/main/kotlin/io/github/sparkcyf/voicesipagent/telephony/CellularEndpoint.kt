@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.telecom.Call
 import android.telecom.TelecomManager
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import io.github.sparkcyf.voicesipagent.voice.CallEndpoint
 import io.github.sparkcyf.voicesipagent.voice.CallLeg
@@ -204,7 +205,8 @@ class CellularEndpoint(
                     reconcileCalls(); reportCalls()
                     return
                 }
-                val leg = CellularLeg("c${ids.getAndIncrement()}", LegDirection.INBOUND, Party(number.ifEmpty { null }, details.callerDisplayName), null, this, main)
+                val party = Party(number.ifEmpty { null }, details.callerDisplayName, simLine(call))
+                val leg = CellularLeg("c${ids.getAndIncrement()}", LegDirection.INBOUND, party, null, this, main)
                 legs[call] = leg
                 leg.bind(call)
                 log("incoming cellular call ${redactNumber(number)} -> gateway (leg ${leg.id})")
@@ -266,6 +268,12 @@ class CellularEndpoint(
             it.abortAudio("call is outside the cellular gateway scope")
         }
     }
+
+    /** 1-based SIM slot of a SIM call; the SIM PhoneAccountHandle id is the subscription id. */
+    private fun simLine(call: Call): Int? = runCatching {
+        val subId = call.details.accountHandle?.id?.toIntOrNull() ?: return null
+        SubscriptionManager.getSlotIndex(subId).takeIf { it >= 0 }?.plus(1)
+    }.getOrNull()
 
     private fun isCellular(call: Call): Boolean {
         val details = call.details

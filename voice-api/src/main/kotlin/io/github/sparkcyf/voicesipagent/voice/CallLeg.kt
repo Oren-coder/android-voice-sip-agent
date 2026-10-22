@@ -15,7 +15,8 @@ enum class LegState {
     ENDED,
 }
 
-data class Party(val number: String?, val displayName: String? = null)
+/** [line]: cellular line that carried the call (1-based SIM slot), when known. */
+data class Party(val number: String?, val displayName: String? = null, val line: Int? = null)
 
 /**
  * One side of a call on one technology (cellular, SIP, an AI voice agent, ...).

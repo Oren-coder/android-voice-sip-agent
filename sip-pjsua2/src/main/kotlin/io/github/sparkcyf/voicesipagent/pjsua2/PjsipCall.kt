@@ -58,6 +58,8 @@ internal class PjsipCall(
         caller.number?.let { n ->
             prm.txOption.headers.add(SipHeader().apply { hName = "P-Asserted-Identity"; hValue = "<${owner.uriFor(n)}>" })
         }
+        // Lets the PBX tell which SIM of a dual-SIM gateway was called.
+        caller.line?.let { l -> prm.txOption.headers.add(SipHeader().apply { hName = Invite.LINE_HEADER; hValue = "$l" }) }
         try {
             c.makeCall(owner.uriFor(target), prm)
         } catch (e: Exception) {

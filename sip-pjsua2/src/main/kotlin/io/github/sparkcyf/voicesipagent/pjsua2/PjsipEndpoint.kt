@@ -255,6 +255,9 @@ internal object Invite {
     /** Header carrying the number to dial when the Request-URI user must stay the gateway's own AoR. */
     const val DIAL_HEADER = "X-VSA-Dial"
 
+    /** Sent on INVITEs for cellular inbound calls: 1-based SIM slot that received the call. */
+    const val LINE_HEADER = "X-VSA-Line"
+
     /**
      * The number the PBX wants us to dial: [DIAL_HEADER] if present (needed behind registrar-based
      * proxies such as Flexisip, which route on the Request-URI user), else the Request-URI user.
