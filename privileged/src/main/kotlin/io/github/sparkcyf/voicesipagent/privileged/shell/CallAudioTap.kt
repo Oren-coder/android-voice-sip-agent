@@ -302,7 +302,7 @@ internal class CallAudioTap(
     /** AirSIM-style fallback for devices without the official interception API. */
     @SuppressLint("MissingPermission")
     private fun openLegacy() {
-        record = openDirectRecordWithFallback()
+        record = ShellEnv.withMicCapability { openDirectRecordWithFallback() }
         try {
             val minTrack = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             check(minTrack > 0) { "track buffer size $minTrack at $rate Hz" }
