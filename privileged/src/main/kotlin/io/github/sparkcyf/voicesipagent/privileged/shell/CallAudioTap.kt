@@ -48,6 +48,9 @@ internal class CallAudioTap(
     private val pcm = PcmFormat(sampleRate)
     private val rate = pcm.sampleRate
     private val frameBytes = pcm.frameBytes
+    /** Direct capture source/rate; may differ from [rate] after a fallback, frames are converted. */
+    private var recSource = MediaRecorder.AudioSource.VOICE_DOWNLINK
+    @Volatile private var recRate = rate
     // Replaced by recoveries: the record only on the capture thread, the track while [switching].
     @Volatile private lateinit var record: AudioRecord
     @Volatile private lateinit var track: AudioTrack
@@ -96,7 +99,7 @@ internal class CallAudioTap(
             result = pfd
             Os.close(app)
             running = true
-            startRecord()
+            if (usedMethod == "direct") startDirectRecordWithFallback() else startRecord()
             startTrack()
             downThread = Thread(::downLoop, "tap-down").apply { priority = Thread.MAX_PRIORITY; start() }
             upThread = Thread(::upLoop, "tap-up").apply { priority = Thread.MAX_PRIORITY; start() }
@@ -163,7 +166,66 @@ internal class CallAudioTap(
 
     private fun startRecord() {
         record.startRecording()
-        check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "record did not start at $rate Hz" }
+        check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "record did not start at $recRate Hz" }
+    }
+
+    /**
+     * Some HALs (e.g. OnePlus 6, Android 11) refuse VOICE_DOWNLINK at the bridge rate. Try other
+     * rates, then VOICE_CALL (which also carries the uplink), keeping the first that starts.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startDirectRecordWithFallback() {
+        val first = runCatching { startRecord() }.exceptionOrNull() ?: return
+        val tried = mutableListOf("VOICE_DOWNLINK@$rate: ${describe(first)}")
+        val dl = MediaRecorder.AudioSource.VOICE_DOWNLINK
+        val call = MediaRecorder.AudioSource.VOICE_CALL
+        val candidates = listOf(dl to 48000, dl to 8000, call to rate, call to 48000, call to 8000)
+            .filter { (src, r) -> !(src == dl && r == rate) && (r == rate || r % rate == 0 || rate % r == 0) }
+        for ((src, r) in candidates) {
+            runCatching { record.stop() }
+            runCatching { record.release() }
+            SystemClock.sleep(RECOVERY_SETTLE_MS)
+            val name = "${if (src == dl) "VOICE_DOWNLINK" else "VOICE_CALL"}@$r"
+            val failure = runCatching {
+                record = createLegacyRecord(src, r)
+                recSource = src
+                recRate = r
+                startRecord()
+            }.exceptionOrNull()
+            if (failure == null) {
+                Log.i(TAG, "capture fallback: using $name after ${tried.joinToString("; ")}")
+                note("capture fallback to $name")
+                return
+            }
+            tried += "$name: ${describe(failure)}"
+        }
+        throw IllegalStateException("no capture configuration started: ${tried.joinToString("; ")}")
+    }
+
+    /** Converts one captured frame at [recRate] to [rate] (integer ratios only). */
+    private fun convertFrame(src: ByteArray, srcLen: Int, dst: ByteArray) {
+        val inSamples = srcLen / 2
+        val outSamples = frameBytes / 2
+        if (recRate > rate) {
+            // Decimate with a box filter over each group of input samples.
+            val k = recRate / rate
+            for (o in 0 until outSamples) {
+                var sum = 0
+                for (j in 0 until k) {
+                    val i = (o * k + j) * 2
+                    sum += (src[i].toInt() and 0xff) or (src[i + 1].toInt() shl 8)
+                }
+                val v = sum / k
+                dst[o * 2] = v.toByte(); dst[o * 2 + 1] = (v shr 8).toByte()
+            }
+        } else {
+            // Upsample by repeating each input sample.
+            val k = rate / recRate
+            for (o in 0 until outSamples) {
+                val i = minOf(o / k, inSamples - 1) * 2
+                dst[o * 2] = src[i]; dst[o * 2 + 1] = src[i + 1]
+            }
+        }
     }
 
     private fun startTrack() {
@@ -261,15 +323,17 @@ internal class CallAudioTap(
     }
 
     @SuppressLint("MissingPermission")
-    private fun createLegacyRecord(): AudioRecord {
-        val minRec = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        check(minRec > 0) { "record buffer size $minRec at $rate Hz" }
-        val created = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_DOWNLINK)
-            .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(minRec, frameBytes * 10))
+    private fun createLegacyRecord(source: Int = recSource, captureRate: Int = recRate): AudioRecord {
+        val minRec = AudioRecord.getMinBufferSize(captureRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        check(minRec > 0) { "record buffer size $minRec at $captureRate Hz" }
+        val captureFrame = frameBytes * captureRate / rate
+        val created = AudioRecord.Builder().setAudioSource(source)
+            .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO, captureRate))
+            .setBufferSizeInBytes(maxOf(minRec, captureFrame * 10))
             .also(::setContext).build()
         if (created.state != AudioRecord.STATE_INITIALIZED) {
             created.release()
-            error("VOICE_DOWNLINK record not initialized at $rate Hz")
+            error("record source $source not initialized at $captureRate Hz")
         }
         return created
     }
@@ -290,19 +354,24 @@ internal class CallAudioTap(
 
     private fun downLoop() {
         val buf = ByteArray(frameBytes)
+        // Capture frame when a fallback records at a higher rate (up to 48 kHz over an 8 kHz bridge).
+        val raw = ByteArray(frameBytes * 6)
         try {
             var offset = 0
             while (running) {
-                val n = record.read(buf, offset, frameBytes - offset, AudioRecord.READ_BLOCKING)
+                val captureFrame = frameBytes * recRate / rate
+                val target = if (captureFrame == frameBytes) buf else raw
+                val n = record.read(target, offset, captureFrame - offset, AudioRecord.READ_BLOCKING)
                 if (n <= 0) {
                     if (!running) break
                     offset = 0
-                    if (recoverCapture("record read $n at $rate Hz")) continue
+                    if (recoverCapture("record read $n at $recRate Hz")) continue
                     break
                 }
                 offset += n
-                if (offset < frameBytes) continue
+                if (offset < captureFrame) continue
                 offset = 0
+                if (target !== buf) convertFrame(raw, captureFrame, buf)
                 downGap.mark(SystemClock.elapsedRealtimeNanos())
                 val p = peak(buf)
                 if (p > downPeak) downPeak = p
@@ -473,8 +542,8 @@ internal class CallAudioTap(
         return p
     }
 
-    private fun format(mask: Int) = AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-        .setSampleRate(rate).setChannelMask(mask).build()
+    private fun format(mask: Int, sampleRate: Int = rate) = AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+        .setSampleRate(sampleRate).setChannelMask(mask).build()
 
     private fun describe(t: Throwable): String {
         var c = t
