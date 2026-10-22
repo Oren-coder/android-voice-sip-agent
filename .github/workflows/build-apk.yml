@@ -1,0 +1,57 @@
+# sip-gateway: builds an UNSIGNED release APK of Voice SIP Agent (arm64-v8a).
+# Signing happens locally on the PC; no keystore or password ever reaches GitHub.
+name: Build APK (unsigned)
+
+on:
+  push:
+    branches: [sipgw]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install NDK 28.2.13676358 and swig
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq swig
+
+      - name: Build pjsua2 native library (pinned, SHA-256 verified by the script)
+        env:
+          ABIS: arm64-v8a
+          APP_PLATFORM: android-30
+        run: bash sip-pjsua2/native/build-pjsua2.sh
+
+      - name: Unit tests
+        run: ./gradlew :sip:test :gateway:test --no-daemon
+
+      - name: Build unsigned release APK
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Checksum
+        run: |
+          cd app/build/outputs/apk/release
+          ls -l
+          sha256sum *.apk | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-sip-agent-unsigned-${{ github.sha }}
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release/SHA256SUMS.txt
+          retention-days: 30
