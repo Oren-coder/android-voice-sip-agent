@@ -1,0 +1,40 @@
+# sip-gateway research tools: tinyalsa v2.0.0 (official source, pinned commit) built with the NDK for arm64.
+name: Build tinyalsa tools (arm64)
+
+on:
+  push:
+    branches: [tools]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Fetch tinyalsa v2.0.0
+        run: |
+          git clone --quiet --depth 1 --branch v2.0.0 https://github.com/tinyalsa/tinyalsa.git
+          git -C tinyalsa rev-parse HEAD | tee tinyalsa-commit.txt
+
+      - name: Install NDK 28.2.13676358
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" > /dev/null
+
+      - name: Build tinymix, tinyplay, tinycap, tinypcminfo (aarch64, API 30)
+        run: |
+          CC="$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang"
+          mkdir out
+          for t in tinymix tinyplay tinycap tinypcminfo; do
+            "$CC" -O2 -fPIE -pie -Itinyalsa/include tinyalsa/src/*.c "tinyalsa/utils/$t.c" -ldl -o "out/$t"
+          done
+          file out/*
+          cp tinyalsa-commit.txt out/
+          (cd out && sha256sum tiny* | tee SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tinyalsa-arm64-${{ github.sha }}
+          path: out/
+          retention-days: 30
