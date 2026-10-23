@@ -242,9 +242,14 @@ class PjsipEndpoint(
         }
     }
 
+    /** Director callbacks must not leak exceptions into pjsip's C code (see PjsipCall.GwCall). */
     internal inner class GwAccount : Account() {
-        override fun onRegState(prm: OnRegStateParam) = this@PjsipEndpoint.onRegState(prm)
-        override fun onIncomingCall(prm: OnIncomingCallParam) = onIncoming(this, prm)
+        override fun onRegState(prm: OnRegStateParam) {
+            try { this@PjsipEndpoint.onRegState(prm) } catch (t: Throwable) { log.warn("onRegState failed", t) }
+        }
+        override fun onIncomingCall(prm: OnIncomingCallParam) {
+            try { onIncoming(this, prm) } catch (t: Throwable) { log.warn("onIncomingCall failed", t) }
+        }
     }
 }
 

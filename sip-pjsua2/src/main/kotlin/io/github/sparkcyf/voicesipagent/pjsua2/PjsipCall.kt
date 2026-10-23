@@ -174,10 +174,8 @@ internal class PjsipCall(
                 if (peer != null) publishMedia(port)
             }
             pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED -> {
-                // The stream may already be gone; the periodic check logged the last counters.
-                runCatching { c.getStreamStat(0) }.getOrNull()?.let { ss ->
-                    try { log.info("call $id final rtp ${describe(ss)}") } catch (_: Exception) {} finally { ss.delete() }
-                }
+                // The stream is gone by now (getStreamStat fails with PJ_EINVAL); checkRtp logged the
+                // last counters.
                 val cause = localCause ?: if (state == LegState.CONNECTED) HangupCause.NORMAL else SipCauses.toCause(code)
                 log.info("call $id ended: $code $cause")
                 finish(cause)
@@ -278,10 +276,21 @@ internal class PjsipCall(
         "?"
     }
 
-    /** pjsua2 call object; forwards callbacks to the leg. */
+    /**
+     * pjsua2 call object; forwards callbacks to the leg. A Java exception left pending in a director
+     * callback unwinds through pjsip's C code and corrupts the process, so none may escape.
+     */
     internal inner class GwCall(acc: PjsipEndpoint.GwAccount, callId: Int = -1) : Call(acc, callId) {
-        override fun onCallState(prm: OnCallStateParam) = onState(this)
-        override fun onCallMediaState(prm: OnCallMediaStateParam) = onMediaState(this)
-        override fun onDtmfDigit(prm: OnDtmfDigitParam) = onDtmf(prm.digit)
+        override fun onCallState(prm: OnCallStateParam) = guard("onCallState") { onState(this) }
+        override fun onCallMediaState(prm: OnCallMediaStateParam) = guard("onCallMediaState") { onMediaState(this) }
+        override fun onDtmfDigit(prm: OnDtmfDigitParam) = guard("onDtmfDigit") { onDtmf(prm.digit) }
+    }
+
+    private inline fun guard(what: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            log.warn("call $id $what failed: $t")
+        }
     }
 }

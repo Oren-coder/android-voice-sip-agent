@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Process
 import android.os.SystemClock
+import android.util.Log
 import java.util.concurrent.TimeUnit
 
 /**
@@ -97,13 +98,18 @@ internal object ShellEnv {
      * Android 11 grants RECORD_AUDIO only to uids holding the while-in-use microphone capability,
      * which the cached shell uid lacks even with the op allowed. Showing a shell activity briefly
      * makes uid 2000 top; audioserver treats the shell uid as always active, so a record created
-     * and started inside that window keeps running after the window is removed.
+     * and started inside that window keeps running after the window is removed. The activity only
+     * becomes top on an awake display with no keyguard, so the gateway must not use a secure lock.
      */
     fun <T> withMicCapability(block: () -> T): T {
-        if (Build.VERSION.SDK_INT != 30 || Process.myUid() != SHELL_UID || recordAllowed() != false) return block()
+        // Always raise the window: a check that passes now can fail by the time the record opens.
+        if (Build.VERSION.SDK_INT != 30 || Process.myUid() != SHELL_UID) return block()
+        run("input", "keyevent", "KEYCODE_WAKEUP")
+        run("wm", "dismiss-keyguard")
         run("am", "start", "-W", "-n", MIC_WINDOW)
         val deadline = SystemClock.elapsedRealtime() + MIC_WINDOW_WAIT_MS
-        while (recordAllowed() == false && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(50)
+        while (recordAllowed() != true && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(50)
+        Log.i("VsaTap", "mic window: record ${if (recordAllowed() == true) "allowed" else "still denied"}")
         try {
             return block()
         } finally {
@@ -118,19 +124,31 @@ internal object ShellEnv {
         null
     }
 
-    /** `am stack list` prints "Stack id=N ..." followed by its tasks. */
+    /**
+     * `am stack list` prints "Stack id=N ..." followed by its tasks. Removal right after launch can
+     * be ignored while the activity is still resuming, so retry until the window is gone.
+     */
     private fun removeMicWindow() {
-        var stack: String? = null
-        for (line in run("am", "stack", "list").out.lineSequence()) {
-            val id = Regex("""^\s*Stack id=(\d+)""").find(line)?.groupValues?.get(1)
-            if (id != null) stack = id
-            if (stack != null && line.contains(MIC_WINDOW_COMPONENT)) run("am", "stack", "remove", stack)
+        repeat(MIC_WINDOW_REMOVE_TRIES) {
+            var stack: String? = null
+            var found = false
+            for (line in run("am", "stack", "list").out.lineSequence()) {
+                val id = Regex("""^\s*Stack id=(\d+)""").find(line)?.groupValues?.get(1)
+                if (id != null) stack = id
+                if (stack != null && line.contains(MIC_WINDOW_COMPONENT)) {
+                    run("am", "stack", "remove", stack)
+                    found = true
+                }
+            }
+            if (!found) return
+            SystemClock.sleep(300)
         }
     }
 
     private const val MIC_WINDOW = "$SHELL_PACKAGE/.HeapDumpActivity"
     private const val MIC_WINDOW_COMPONENT = "$SHELL_PACKAGE/$SHELL_PACKAGE.HeapDumpActivity"
     private const val MIC_WINDOW_WAIT_MS = 2000L
+    private const val MIC_WINDOW_REMOVE_TRIES = 5
 
     data class Result(val exit: Int, val out: String)
 
